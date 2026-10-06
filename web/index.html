@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>synq 帧同步回滚演示</title>
+<!--
+  设计规范见 DESIGN.md
+
+  上一版失败的教训（本版严格规避）：
+  1. 不做分屏 —— 两屏对照要求用户来回比对，视觉噪声翻倍。差异改用文字表达。
+  2. 不叠加面板 —— 每修一个 bug 就加一个面板，最终 6 个区域挤在一起。
+     本版只有 3 个：���战图 / 控制条 / 状态行。
+  3. 战斗连线全部删掉 —— 「莫名其妙的线条」就是它们。战斗信息用文字表达。
+  4. rAF 放在函数最前 + draw 包 try/catch —— 任何异常都不能终止循环。
+-->
+<style>
+:root{
+  /* 语义色（3） */
+  --ok:#3fb950; --warn:#d29922; --danger:#f85149;
+  /* 玩家色（4，仅区分身份） */
+  --p0:#39d0d8; --p1:#f85149; --p2:#4ade80; --p3:#d29922;
+  /* 中性色（5，统一冷 slate） */
+  --bg:#0d1117; --surface:#161b22; --border:#30363d;
+  --text:#e6edf3; --text-dim:#8b949e;
+  /* 圆角（2） */
+  --r-sm:3px; --r-md:5px;
+  /* 字体 */
+  --ui:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  --mono:ui-monospace,"SF Mono",Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:13px/1.55 var(--ui);padding:20px 24px;
+     max-width:1180px;margin:0 auto}
+h1{font-size:15px;font-weight:600;letter-spacing:-.01em}
+.sub{font:11px/1.5 var(--mono);color:var(--text-dim);margin-top:2px}
+
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-md);
+       margin-top:14px}
+.ph{padding:8px 12px;border-bottom:1px solid var(--border);
+    font:600 11px/1.4 var(--mono);letter-spacing:.04em;color:var(--text-dim);
+    display:flex;justify-content:space-between;align-items:center}
+
+/* 对战图 */
+#arena{display:block;width:100%;height:auto;background:#0a0e13}
+
+/* 控制条 */
+.ctl{display:flex;align-items:center;gap:10px;padding:9px 12px;flex-wrap:wrap}
+button{background:var(--surface);color:var(--text);border:1px solid var(--border);
+       border-radius:var(--r-sm);padding:5px 11px;font:12px var(--ui);cursor:pointer}
+button:hover{background:#1c2128;border-color:var(--text-dim)}
+button:focus-visible{outline:1px solid var(--p0);outline-offset:1px}
+button[aria-pressed=true]{background:#16323a;border-color:var(--p0);color:#eafffb}
+.seg{display:flex;gap:2px}
+.readout{font:12px/1 var(--mono);color:var(--text-dim)}
+.readout b{color:var(--text);font-weight:600}
+
+/* 时间轴 */
+#tl{display:block;width:100%;height:26px;cursor:pointer}
+
+/* 状态行 —— 承担上一版「差异表 + 事件流 + 指标面板」的全部职责 */
+.status{padding:10px 12px;font:12px/1.6 var(--mono);min-height:66px}
+.status .row{display:flex;gap:8px;align-items:baseline}
+.status .k{color:var(--text-dim);min-width:4.5em}
+.status .v{color:var(--text)}
+.tag{display:inline-block;padding:0 5px;border-radius:var(--r-sm);
+     font:11px/1.5 var(--ui);border:1px solid currentColor}
+.tag-d{color:var(--danger)} .tag-w{color:var(--warn)} .tag-o{color:var(--ok)}
+.empty{color:var(--text-dim);font:var(--ui)}
+
+footer{margin-top:16px;padding-top:10px;border-top:1px solid var(--border);
+       font:11px/1.6 var(--mono);color:var(--text-dim);display:flex;
+       justify-content:space-between;gap:12px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+
+<h1>synq 帧同步回滚演示</h1>
+
+<div class="panel">
+  <div class="ph">
+    <span>对战图 · 客户端视角</span>
+    <span id="phase">—</span>
+  </div>
+  <canvas id="arena" width="1100" height="560"></canvas>
+</div>
+
+<div class="panel">
+  <div class="ctl">
+    <button id="play" aria-pressed="false">播放</button>
+    <button id="step">单步</button>
+    <div class="seg">
+      <button data-s="0.1">0.1×</button>
+      <button data-s="0.5">0.5×</button>
+      <button data-s="1" aria-pressed="true">1×</button>
+      <button data-s="2">2×</button>
+    </div>
+    <span class="readout">帧 <b id="cur">0</b> / <span id="total">0</span> · <span id="sec">0.00</span>s</span>
+    <button id="jump">跳到下次回滚</button>
+  </div>
+  <canvas id="tl" width="1100" height="26"></canvas>
+</div>
+
+<div class="panel">
+  <div class="ph"><span>本帧状态</span><span id="hint"></span></div>
+  <div class="status" id="status"></div>
+</div>
+
+<footer>
+  <span id="foot-left">synq · 帧同步回滚网络同步</span>
+  <span id="foot-right">数据来源 src/export_trace.cpp（C++ 模拟内核直出）</span>
+</footer>
+
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const S={d:null,f:0,playing:false,speed:1,
+         acc:0,last:0,t0:0,t1:0,alpha:0,holdUntil:0,holding:false};
+const NAME=['P0','P1','P2','P3'];
+const PCOL=['--p0','--p1','--p2','--p3'].map(v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim());
+// canvas 的 rgba() 不接受 #hex，需 RGB 分量形式
+const PCOL_RGB=PCOL.map(h=>[1,3,5].map(i=>parseInt(h.substr(i,2),16)).join(','));
+
+fetch('trace.json').then(r=>r.json()).then(d=>{
+  S.d=d;
+  $('total').textContent=d.frames.length-1;
+  $('tl').width=d.frames.length;   // 1px/帧，无需缩放
+  $('hint').textContent=`延迟 你:${d.meta.delays[0]}帧 P1:${d.meta.delays[1]} P2:${d.meta.delays[2]} P3:${d.meta.delays[3]}`;
+  $('foot-right').textContent=`数据来源 src/export_trace.cpp（C++ 模拟内核直出）· ${d.frames.length} 帧`;
+  buildTimeline();
+  paint();
+}).catch(e=>{
+  $('status').innerHTML=`<p class="empty">无法加载 trace.json：${e.message}</p>`+
+    `<p class="empty">请运行 start_web.bat 生成数据，并通过 HTTP 访问本页。</p>`;
+});
+
+/* ---------- 对战图绘制 ----------
+   画面元素上限 12 个：4 玩家 × (本体 + 血条 + 名字)，外加边框与回滚角标。
+   战斗连线一律不画 —— 那是上一版「莫名其妙的线条」的来源。
+------------------------------------------------------- */
+const cv=$('arena'), g=cv.getContext('2d'), PAD=26;
+const FW=cv.width-PAD*2, FH=cv.height-PAD*2;
+
+function paint(){
+  if(!S.d) return;
+  const d=S.d, N=d.frames.length;
+
+  // 插值帧（0.5x 以下定住：t0=t1，无插值）
+  const still = S.speed < 0.5;
+  const interp = !still && S.t0!==S.t1 && S.t0>=0 && S.t0<N;
+  const A = interp ? S.alpha : 0;
+  const fPrev = interp ? d.frames[S.t0] : d.frames[S.f];
+  const f = d.frames[S.f];
+
+  g.clearRect(0,0,cv.width,cv.height);
+  g.fillStyle='#0a0e13'; g.fillRect(0,0,cv.width,cv.height);
+
+  // 场地：边框 + 淡网格
+  g.strokeStyle='#30363d'; g.lineWidth=1; g.strokeRect(PAD,PAD,FW,FH);
+  g.strokeStyle='rgba(48,54,61,.5)';
+  g.beginPath();
+  for(let i=1;i<8;i++){
+    const x=PAD+FW*i/8, y=PAD+FH*i/8;
+    g.moveTo(x,PAD); g.lineTo(x,PAD+FH);
+    g.moveTo(PAD,y); g.lineTo(PAD+FW,y);
+  }
+  g.stroke();
+
+  const R=15, X=x=>PAD+x/100*FW, Y=y=>PAD+y/100*FH;
+
+  // 玩家：插值位置 + 权威血量/存活（离散量不插值）
+  for(let p=0;p<4;p++){
+    const cur=f.client[p], prev=fPrev.client[p];
+    const x=X(interp ? prev.x+(cur.x-prev.x)*A : cur.x);
+    const y=Y(interp ? prev.y+(cur.y-prev.y)*A : cur.y);
+
+    if(!cur.alive){
+      // 阵亡：叉 + 复活倒计时
+      g.strokeStyle=PCOL[p]; g.globalAlpha=.45; g.lineWidth=2;
+      g.beginPath();
+      g.moveTo(x-8,y-8); g.lineTo(x+8,y+8);
+      g.moveTo(x+8,y-8); g.lineTo(x-8,y+8);
+      g.stroke(); g.globalAlpha=1;
+      if(cur.rt>0){
+        g.fillStyle=PCOL[p]; g.globalAlpha=.7;
+        g.font='11px ui-monospace,"SF Mono",Consolas,monospace'; g.textAlign='center';
+        g.fillText('复活 '+(cur.rt/30).toFixed(1)+'s', x, y-R-6);
+        g.globalAlpha=1;
+      }
+      continue;
+    }
+
+    // 本体
+    g.beginPath(); g.arc(x,y,R,0,7);
+    g.fillStyle=PCOL[p]+'26'; g.fill();
+    g.strokeStyle=PCOL[p]; g.lineWidth=2; g.stroke();
+
+    // 复活保护：额外外环
+    if(cur.sp>0){
+      g.beginPath(); g.arc(x,y,R+5,0,7);
+      g.strokeStyle='#79dbfb'; g.lineWidth=1.5; g.stroke();
+    }
+
+    // 血条（在本体上方，不用背景框，直接描边）
+    const hr=Math.max(0,cur.hp/1000), bw=34, bh=4;
+    const bx=x-bw/2, by=y-R-9;
+    g.fillStyle='#0a0e13'; g.fillRect(bx-1,by-1,bw+2,bh+2);
+    g.fillStyle=hr>.5?'#3fb950':hr>.25?'#d29922':'#f85149';
+    g.fillRect(bx,by,bw*hr,bh);
+
+    // 名字（P0..P3 冗余标注，作为颜色的二次编码）
+    g.fillStyle=PCOL[p]; g.font='600 13px ui-monospace,"SF Mono",Consolas,monospace';
+    g.textAlign='center'; g.textBaseline='middle';
+    g.fillText(NAME[p],x,y);
+  }
+
+  // ---------- 攻击可视化 ----------
+  // 【为什么改成实线连到目标】
+  // 初版为解决「长线横贯全场显得乱」，把射线长度封顶在 39px
+  // （min(距离×45%, R×2.6)），实测玩家平均间距 406px ——
+  // **射线只覆盖 6%，平均缺口 350px**。用户看到的是
+  // 「线条还没到别人身上就消失了」，等于攻击没打中。
+  //
+  // 修正：射线必须**连到目标本体边缘**（dist - 2R），
+  // 「显得乱」的问题改用其他手段解决：
+  //   ① 线宽收窄（普攻 1.6px，火球 2.6px）
+  //   ② 沿路径渐隐（起点实、终点淡出到 0.35 而不是 0）
+  //   ③ 终点不画箭头，只在目标身上画命中环
+  // 这样线是完整的，但视觉上依然是"轻扫过"而不是"硬连接"。
+  if(f.hits && f.hits.length){
+    for(const h of f.hits){
+      if(h.from<0||h.to<0||h.from===h.to) continue;
+      const a=f.client[h.from], b=f.client[h.to];
+      if(!a.alive||!b.alive) continue;
+
+      const x1=X(interp ? fPrev.client[h.from].x+(a.x-fPrev.client[h.from].x)*A : a.x);
+      const y1=Y(interp ? fPrev.client[h.from].y+(a.y-fPrev.client[h.from].y)*A : a.y);
+      const x2=X(interp ? fPrev.client[h.to].x+(b.x-fPrev.client[h.to].x)*A : b.x);
+      const y2=Y(interp ? fPrev.client[h.to].y+(b.y-fPrev.client[h.to].y)*A : b.y);
+
+      const dx=x2-x1, dy=y2-y1, dist=Math.hypot(dx,dy);
+      if(dist<1) continue;                    // 同点退化
+      const ux=dx/dist, uy=dy/dist;
+      // 起点=攻击者边缘，终点=目标边缘（中间不截断）
+      const sx=x1+ux*R, sy=y1+uy*R;
+      const reach=Math.max(0, dist-2*R);
+      const ex=sx+ux*reach, ey=sy+uy*reach;
+
+      // 渐变只做柔化：终点仍有 35% 不透明度，不会"消失"
+      const grad=g.createLinearGradient(sx,sy,ex,ey);
+      const color = h.kind===1 ? '251,191,36' : (h.kind===2 ? '63,185,80' : PCOL_RGB[h.from]);
+      grad.addColorStop(0,   `rgba(${color},0.95)`);
+      grad.addColorStop(0.7, `rgba(${color},0.75)`);
+      grad.addColorStop(1,   `rgba(${color},0.35)`);
+      g.strokeStyle=grad;
+      g.lineWidth = h.kind===1 ? 2.6 : (h.kind===2 ? 2.2 : 1.6);
+      g.beginPath(); g.moveTo(sx,sy); g.lineTo(ex,ey); g.stroke();
+
+      // 目标身上的命中环 —— 明确「打中的是他」
+      g.strokeStyle = h.kind===1 ? '#d29922' : `rgba(${color},0.95)`;
+      g.lineWidth = 2;
+      g.beginPath(); g.arc(x2,y2,R+6,0,7); g.stroke();
+
+      // 伤害数字
+      const label = h.kind===2 ? `+${h.dmg}` : `-${h.dmg}`;
+      g.font='600 12px ui-monospace,"SF Mono",Consolas,monospace';
+      g.textAlign='center'; g.textBaseline='bottom';
+      g.fillStyle = h.kind===2 ? '#3fb950' : (h.kind===1 ? '#d29922' : '#e6edf3');
+      g.fillText(label, x2, y2-R-12);
+    }
+  }
+
+  // 回滚角标（画面右上角，一个小标签，不遮挡）
+  if(f.rolls>0){
+    const label=f.preRollback ? `回滚 ${f.rolls} 帧（自 f${f.preRollback.from}）` : `回滚 ${f.rolls} 帧`;
+    g.font='12px ui-monospace,"SF Mono",Consolas,monospace'; g.textAlign='right'; g.textBaseline='top';
+    const tw=g.measureText(label).width;
+    g.fillStyle='rgba(248,81,73,.14)';
+    g.fillRect(cv.width-tw-14,8,tw+10,20);
+    g.fillStyle='#f85149';
+    g.fillText(label,cv.width-12,12);
+  } else if(f.clientRoll>0){
+    g.font='12px ui-monospace,"SF Mono",Consolas,monospace'; g.textAlign='right'; g.textBaseline='top';
+    g.fillStyle='#d29922';
+    g.fillText(`客户端回滚 ${f.clientRoll} 帧`,cv.width-12,12);
+  }
+
+  // 时间轴游标（只画游标，条带是预渲染的）
+  drawTimeline();
+
+  updateStatus(f);
+  $('cur').textContent=S.f;
+  $('sec').textContent=(S.f/d.meta.tickRate).toFixed(2);
+}
+
+/* ---------- 状态行：替代上一版的差异表 + 事件流 + 指标面板 ---------- */
+function updateStatus(f){
+  const rows=[];
+
+  // 1. 回滚纠正了谁
+  if(f.preRollback){
+    const diff=[];
+    for(let p=0;p<4;p++){
+      const a=f.preRollback.players[p], b=f.server[p];
+      const parts=[];
+      if(a.alive!==b.alive) parts.push(b.alive?'误判为阵亡':'误判为存活');
+      if(a.hp!==b.hp) parts.push(`血量 ${a.hp}→${b.hp}`);
+      if(parts.length) diff.push(`${NAME[p]} ${parts.join('，')}`);
+    }
+    rows.push(['纠正', diff.length
+      ? `<span class="tag tag-d">${diff.length} 处</span> ${diff.join('；')}`
+      : '<span class="empty">预测正确，无需纠正</span>']);
+  } else {
+    rows.push(['回滚', f.rolls>0
+      ? `重算 ${f.rolls} 帧（无快照差异数据）`
+      : '<span class="empty">本帧无回滚</span>']);
+  }
+
+  // 2. 本帧战斗（文字，不用连线）
+  if(f.hits && f.hits.length){
+    const kinds={0:'普攻',1:'火球',2:'治疗'};
+    const txt=f.hits.map(h=>{
+      const k=kinds[h.kind]||'?';
+      const d=h.kind===2?`+${h.dmg}`:`-${h.dmg}`;
+      const self=h.from===h.to?'自身':`${NAME[h.to]}`;
+      return `<span style="color:${PCOL[h.from]}">${NAME[h.from]}</span> ${k}${self} ${d}`;
+    }).join('，');
+    rows.push(['战斗', txt]);
+  } else {
+    rows.push(['战斗', '<span class="empty">无</span>']);
+  }
+
+  // 3. 存活状态
+  const alive=f.server.filter(p=>p.alive).length;
+  rows.push(['存活', `${alive} / 4`]);
+
+  $('status').innerHTML = rows.map(([k,v])=>
+    `<div class="row"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('');
+  $('phase').textContent = f.preRollback ? '预测有误，正在纠正' : (f.rolls>0?'回滚中':'预测正确');
+}
+
+/* ---------- 时间轴 ----------
+   分两层：底层一次性画好 600 帧的条带（离屏 canvas），上层每帧只画游标。
+   上一版每帧重画 600 个像素，30fps 下白扔 18000 次绘制调用。
+--------------------------------------------------------------- */
+const tl=$('tl'), tg=tl.getContext('2d');
+let tlBase=null;                       // 离屏：静态条带
+function buildTimeline(){
+  const d=S.d, H=tl.height;
+  tlBase=document.createElement('canvas');
+  tlBase.width=tl.width; tlBase.height=H;
+  const c=tlBase.getContext('2d');
+  c.fillStyle='#0a0e13'; c.fillRect(0,0,tl.width,H);
+  for(let i=0;i<d.frames.length;i++){
+    const f=d.frames[i];
+    c.fillStyle = f.clientRoll>0 ? '#d29922'
+                : f.rolls>0    ? '#f85149'
+                : 'rgba(63,185,80,.4)';
+    c.fillRect(i,4,1,H-8);
+  }
+  drawTimeline();
+}
+function drawTimeline(){
+  if(!tlBase) return;
+  tg.clearRect(0,0,tl.width,tl.height);
+  tg.drawImage(tlBase,0,0);
+  tg.fillStyle='#e6edf3';
+  tg.fillRect(S.f-1,0,3,tl.height);   // 游标
+}
+tl.addEventListener('click',e=>{
+  const r=tl.getBoundingClientRect();
+  seek(Math.round((e.clientX-r.left)/r.width*(S.d.frames.length-1)));
+});
+function seek(i){
+  pause();
+  S.f=Math.max(0,Math.min(S.d.frames.length-1,i));
+  S.t0=S.t1=S.f; S.alpha=0; S.acc=0;
+  paint();          // paint() 内部会更新时间轴游标
+}
+
+/* ---------- 渲染循环 ----------
+   rAF 必须放在函数最前：任何后续异常都不能终止链（上一版的致命伤）。
+------------------------------------------------------------- */
+const FR=1000/30;
+function frame(ts){
+  requestAnimationFrame(frame);          // ← 先排队
+
+  if(!S.d) return;
+  if(S.playing){
+    if(ts<S.holdUntil){ S.last=ts; return; }
+    if(!S.last) S.last=ts;
+    S.acc+=(ts-S.last)*S.speed;
+    S.last=ts;
+
+    while(S.acc>=FR){
+      S.acc-=FR;
+      S.t0=S.f;
+      S.f = S.f>=S.d.frames.length-1 ? 0 : S.f+1;
+      S.t1=S.f;
+      if(S.f===0) S.acc=0;
+    }
+    S.alpha=Math.min(1,S.acc/FR);
+
+    // 慢速定住
+    if(S.speed<0.5 && !S.holding){
+      S.holding=true; S.holdUntil=ts+FR*(1/S.speed-1);
+    } else if(S.speed>=0.5) S.holding=false;
+
+    drawTimeline();
+  } else {
+    S.last=ts;
+  }
+
+  try { paint(); }
+  catch(err){
+    // 单帧异常不影响循环，且只提示一次
+    if(!S.errOnce){
+      S.errOnce=true;
+      console.error('渲染异常（循环未中断）:',err);
+      $('status').insertAdjacentHTML('afterbegin',
+        `<div class="row"><span class="k">错误</span><span class="v" style="color:var(--danger)">`+
+        `渲染异常：${err.message}（循环未中断）</span></div>`);
+    }
+  }
+}
+requestAnimationFrame(frame);
+
+/* ---------- 控件 ---------- */
+function play(){ S.playing=true; S.last=0; $('play').textContent='暂停'; $('play').setAttribute('aria-pressed','true'); }
+function pause(){ S.playing=false; S.last=0; $('play').textContent='播放'; $('play').setAttribute('aria-pressed','false'); }
+
+$('play').onclick=()=>S.playing?pause():play();
+$('step').onclick=()=>{ pause(); seek(S.f+1); };
+$('jump').onclick=()=>{
+  pause();
+  for(let i=S.f+1;i<S.d.frames.length;i++){
+    if(S.d.frames[i].rolls>0){ seek(i); return; }
+  }
+  seek(0);   // 没有下一次回滚就回到开头
+};
+document.querySelectorAll('[data-s]').forEach(b=>{
+  b.onclick=()=>{
+    document.querySelectorAll('[data-s]').forEach(x=>x.setAttribute('aria-pressed','false'));
+    b.setAttribute('aria-pressed','true');
+    S.speed=parseFloat(b.dataset.s);
+    S.holding=false;
+  };
+});
+
+document.addEventListener('keydown',e=>{
+  if(!S.d) return;
+  if(e.code==='Space'){ e.preventDefault(); S.playing?pause():play(); }
+  else if(e.code==='ArrowRight'){ e.preventDefault(); $('step').click(); }
+  else if(e.code==='ArrowLeft'){ e.preventDefault(); seek(S.f-1); }
+});
+</script>
+</body>
+</html>
