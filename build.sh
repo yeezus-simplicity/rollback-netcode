@@ -33,6 +33,7 @@ build deltasnap    delta_snapshot_test.cpp
 build visualdemo   client/visual_demo.cpp
 build gameserver   server_main.cpp
 build exporttrace  export_trace.cpp
+build histogram    histogram_test.cpp
 
 if [[ "$1" == "verify" ]]; then
   echo ""
@@ -82,7 +83,11 @@ if [[ "$1" == "verify" ]]; then
   "$OUT/visualdemo" fast 2>&1 | tail -22
 
   echo ""
-  echo "===== 8. 导出 Web 可视化数据 ====="
+  echo "===== 8. 延迟直方图（可观测性）====="
+  "$OUT/histogram"
+
+  echo ""
+  echo "===== 9. 导出 Web 可视化数据 ====="
   "$OUT/exporttrace" 600 > web/trace.json
   echo "  已生成 web/trace.json ($(wc -c < web/trace.json) 字节)"
 fi
