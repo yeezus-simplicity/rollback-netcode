@@ -35,6 +35,7 @@ build gameserver   server_main.cpp
 build exporttrace  export_trace.cpp
 build histogram    histogram_test.cpp
 build configtest   config_test.cpp
+build loadtest     loadtest_main.cpp
 
 if [[ "$1" == "verify" ]]; then
   echo ""
@@ -116,6 +117,14 @@ if [[ "$1" == "server" ]]; then
   [[ "$2" == "play" ]] && "$OUT/visualdemo" play
   exit 0
   echo ""
+  if [[ "$2" == "loadtest" ]]; then
+    echo "真实 socket 压测"
+    echo "  终端 1: ./gameserver 4 60 15 1 3000"
+    echo "  终端 2: ./loadtest --clients 4 --duration 30"
+    echo ""
+    "$OUT/loadtest" "${@:3}"
+    exit 0
+  fi
   echo "启动游戏服务器（玩家=4 延迟=60ms 抖动=15 丢包=1% 帧数=900）"
   "$OUT/gameserver" 4 60 15 1 900
 fi

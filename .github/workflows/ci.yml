@@ -1,0 +1,114 @@
+# CI —— 自动验证
+#
+# 这个项目的一个卖点是「所有数据均为本机实测，可用 ./build.sh verify 复现」。
+# 但 README 里的话不算证据，**每次 push 都跑一遍才算**。
+#
+# 关键：确定性测试必须在**多种优化级别**下比对哈希 ——
+# 这是本项目最有价值的验证，单一编译配置下它什么都测不出来。
+#
+# 无第三方依赖，纯标准库，Linux/macOS 直接编；Windows 走 MSYS2。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    name: 跨优化级别确定性 + 全部验证
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装编译环境
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ make
+
+      - name: 编译（gcc）
+        run: |
+          g++ -O2 -std=c++20 -pthread -Isrc src/determinism_test.cpp -o /tmp/det
+          g++ -O2 -std=c++20 -pthread -Isrc src/rollback_test.cpp      -o /tmp/rb
+          g++ -O2 -std=c++20 -pthread -Isrc src/delta_snapshot_test.cpp -o /tmp/ds
+          g++ -O2 -std=c++20 -pthread -Isrc src/bandwidth_test.cpp    -o /tmp/bw
+          g++ -O2 -std=c++20 -pthread -Isrc src/replay_test.cpp       -o /tmp/rp
+          g++ -O2 -std=c++20 -pthread -Isrc src/multi_room_test.cpp   -o /tmp/mr
+          g++ -O2 -std=c++20 -pthread -Isrc src/histogram_test.cpp    -o /tmp/hist
+          g++ -O2 -std=c++20 -pthread -Isrc src/config_test.cpp       -o /tmp/cfg
+          g++ -O2 -std=c++20 -pthread -Isrc src/loadtest_main.cpp     -o /tmp/lt
+
+      # 这一步是本项目 CI 的核心价值 ——
+      # 用 5 种优化级别编译同一份模拟核心，逐帧比对状态哈希。
+      # 若某级别因 UB 产生不同结果，这一步会失败。
+      - name: 确定性验证（-O0/-O1/-O2/-O3/-Os 逐帧哈希比对）
+        run: |
+          set -e
+          REF=""
+          for OPT in O0 O1 O2 O3 Os; do
+            g++ -$OPT -std=c++20 -pthread -Isrc src/determinism_test.cpp -o /tmp/det_$OPT
+            HASH=$(/tmp/det_$OPT $OPT 12345 2000 | grep FINAL_HASH | awk '{print $2}')
+            echo "  -$OPT  -> $HASH"
+            if [ -z "$REF" ]; then
+              REF=$HASH
+            elif [ "$HASH" != "$REF" ]; then
+              echo "::error::确定性失败：-$OPT 得到 $HASH，期望 $REF"
+              exit 1
+            fi
+          done
+          echo "✓ 五种优化级别逐帧哈希一致：$REF"
+
+      # 各测试程序的参数格式已逐一核对（不能用build.sh 的调用方式硬套）：
+      #   rollback_testseed delay frames delayed_players
+      #   delta_snapshot_test  cap frames
+      #   multi_room_test      rooms frames
+      #   replay_test          frames
+      #   bandwidth_test / histogram_test / config_test  无参
+      - name: 回滚正确性（延迟 1/2/3/5/8/12 帧）
+        run: |
+          for D in 1 2 3 5 8 12; do
+            /tmp/rb 999 $D 3000 1 | tail -3
+          done
+
+      - name: 增量快照（压缩比 + 随机取帧一致性）
+        run: /tmp/ds 64 2000
+
+      - name: 带宽对比
+        run: /tmp/bw
+
+      - name: 对局回放（CRC 校验 + 篡改拒绝）
+        run: /tmp/rp 1800
+
+      - name: 多房间并发压测
+        run: /tmp/mr 128 2000
+
+      - name: 延迟直方图（分位数 + Prometheus 导出）
+        run: /tmp/hist
+
+      - name: 优雅退出与配置
+        run: /tmp/cfg
+
+      - name: 完整验证（build.sh verify）
+        run: ./build.sh verify
+
+  clang:
+    name: Clang 编译检查（编译器可移植性）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y clang
+      - run: clang++ -O2 -std=c++20 -pthread -Isrc src/determinism_test.cpp -o /tmp/det_clang
+      - name: Clang 下确定性哈希（应与 GCC 相同 —— 跨编译器一致性）
+        run: |
+          GCC_HASH=$(g++ -O2 -std=c++20 -pthread -Isrc src/determinism_test.cpp -o /tmp/det_gcc && /tmp/det_gcc O2 12345 2000 | grep FINAL_HASH | awk '{print $2}')
+          CLANG_HASH=$(/tmp/det_clang O2 12345 2000 | grep FINAL_HASH | awk '{print $2}')
+          echo "GCC  : $GCC_HASH"
+          echo "Clang: $CLANG_HASH"
+          if [ "$GCC_HASH" != "$CLANG_HASH" ]; then
+            echo "::error::跨编译器结果不一致"
+            exit 1
+          fi
+          echo "✓ GCC 与 Clang 结果一致"
