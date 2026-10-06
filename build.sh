@@ -34,6 +34,7 @@ build visualdemo   client/visual_demo.cpp
 build gameserver   server_main.cpp
 build exporttrace  export_trace.cpp
 build histogram    histogram_test.cpp
+build configtest   config_test.cpp
 
 if [[ "$1" == "verify" ]]; then
   echo ""
@@ -87,7 +88,11 @@ if [[ "$1" == "verify" ]]; then
   "$OUT/histogram"
 
   echo ""
-  echo "===== 9. 导出 Web 可视化数据 ====="
+  echo "===== 9. 优雅退出与配置 ====="
+  "$OUT/configtest"
+
+  echo ""
+  echo "===== 10. 导出 Web 可视化数据 ====="
   "$OUT/exporttrace" 600 > web/trace.json
   echo "  已生成 web/trace.json ($(wc -c < web/trace.json) 字节)"
 fi
