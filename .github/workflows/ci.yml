@@ -29,6 +29,36 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y g++ make
 
+      # 【踩坑·执行权限与行尾】
+      # 最初 build.sh 在仓库里的模式是 100644（非可执行），而最后一步
+      # `run: ./build.sh verify` 在 Linux runner 上直接 Permission denied，
+      # 整个 job 14 秒失败 —— 但报错只有一行，看不出根因。
+      #
+      # 更隐蔽的是：仓库里原本没有 .gitattributes，而开发机 core.autocrlf=true。
+      # 同一文件在 Windows 检出是 CRLF、CI 检出是 LF，
+      # **无法用本地复现 CI 的行为**，shebang 被污染就会
+      # 报 `cannot execute: required file not found`。
+      #
+      # 这里显式断言权限位与行尾，同类问题以后会在日志里直接可见，
+      # 而不是等到某个 step 神秘失败。
+      - name: 预检（脚本可执行 + LF 行尾）
+        run: |
+          set -e
+          # 权限位必须在 100755，否则 ./build.sh 直接 Permission denied
+          MODE=$(git ls-files -s build.sh | awk '{print $1}')
+          if [ "$MODE" != "100755" ]; then
+            echo "::error::build.sh 的 git 模式是 $MODE，应为 100755"
+            echo "修复：git update-index --chmod=+x build.sh && git commit"
+            exit 1
+          fi
+          echo "  build.sh 模式 $MODE ✓"
+          # 首行不得含 CR，否则 shebang 失效
+          if head -1 build.sh | grep -q $'\r'; then
+            echo "::error::build.sh 首行含 CR（CRLF），shebang 会失效"
+            exit 1
+          fi
+          echo "  build.sh 行尾 LF ✓"
+
       - name: 编译（gcc）
         run: |
           g++ -O2 -std=c++20 -pthread -Isrc src/determinism_test.cpp -o /tmp/det

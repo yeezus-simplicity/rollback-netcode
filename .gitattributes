@@ -1,0 +1,56 @@
+# 强制行尾策略 —— 避免跨平台协作时的经典坑
+#
+# 【为什么必须显式写这个文件】
+# 本项目开发环境在 Windows（core.autocrlf=true），若没有 .gitattributes：
+#   - Windows 上 clone：CRLF（工作区）
+#   - Linux CI 上 clone：LF（GitHub runner 不做 autocrlf 转换）
+# 这意味着**同一个文件在两端行尾不同**，而你无法从本地复现 CI 的行为。
+#   典型后果：shell 脚本出现 ^M，bash 报
+#     `build.sh: line N: ...: command not found`
+#   或 worse —— shebang 被污染成 `#!/bin/bash\r`，直接
+#     `cannot execute: required file not found`
+#
+# 【规则】
+# * 文本文件在仓库内**统一存 LF**，checkout 到Windows 时由Git 转为 CRLF。
+#   （text=auto 让 Git 自行判断二进制/文本；显式声明 *.sh 更保险）
+# * 二进制文件必须标 binary，否则 Git 可能做换行/文本转换导致文件损坏。
+
+# --- 默认：自动判断 ---
+*               text=auto
+
+# --- shell 脚本：仓库内强制 LF ---
+*.sh            text eol=lf
+
+# --- CI 配置：YAML 对行尾敏感（尤其含多行字符串时）---
+*.yml           text eol=lf
+*.yaml          text eol=lf
+
+# --- C++ 源码与头文件：统一 LF ---
+*.cpp           text eol=lf
+*.h             text eol=lf
+*.hpp           text eol=lf
+*.cc            text eol=lf
+
+# --- Web / 文档 ---
+*.html          text eol=lf
+*.css           text eol=lf
+*.js            text eol=lf
+*.json          text eol=lf
+*.md            text eol=lf
+*.txt           text eol=lf
+*.bat           text eol=crlf
+*.conf          text eol=lf
+
+# --- 二进制：禁止任何转换 ---
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.ico           binary
+*.pdf           binary
+*.exe           binary
+*.o             binary
+*.a             binary
+*.so            binary
+*.zip           binary
+*.gz            binary
