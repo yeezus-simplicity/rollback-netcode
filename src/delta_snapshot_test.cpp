@@ -120,7 +120,7 @@ int main(int argc, char** argv) {
   std::printf("  基准帧(完整)  : %zu 帧\n", ring.full_frames());
   std::printf("  增量帧        : %zu 帧, 平均 %.1f 字节/帧\n",
               ring.delta_frames(), static_cast<double>(ring.avg_delta_bytes()));
-  std::printf("  (对比：完整帧 %.0f 字节/帧)\n", sizeof(World));
+  std::printf("  (对比：完整帧 %zu 字节/帧)\n", sizeof(World));
 
   // 内存承载外推
   double per_room_kb = comp / 1024.0;
@@ -145,7 +145,7 @@ int main(int argc, char** argv) {
   std::printf("| 增量快照环 | %.2f KB |\n", comp / 1024.0);
   std::printf("| **压缩比** | **%.2fx** |\n",
               static_cast<double>(raw) / static_cast<double>(comp == 0 ? 1 : comp));
-  std::printf("| 平均增量帧大小 | %.1f 字节 (完整帧 %.0f 字节) |\n",
+  std::printf("| 平均增量帧大小 | %.1f 字节 (完整帧 %zu 字节) |\n",
               static_cast<double>(ring.avg_delta_bytes()), sizeof(World));
   std::printf("| 正确性 | %d/%d 帧哈希逐位一致（另 %d 帧超出环深属预期）|\n", ok, ok + fail, out_of_range);
   std::printf("| 压入耗时 | %.3f us/帧 |\n", push_us);

@@ -60,6 +60,17 @@ inline int set_nonblock(int fd) {
 #  include <sys/socket.h>
 #  include <unistd.h>
 #  include <cerrno>
+#  // set_nonblock() 需要 fcntl / F_GETFL / F_SETFL / O_NONBLOCK，
+#  // 这些符号由 <fcntl.h> 提供，**不能依赖其他头文件间接引入**。
+#  //
+#  // 【踩坑·只在 Linux 暴露的编译错误】
+#  // 最初漏了这一行，于是本文件从来没在 Linux 上被编译过：
+#  //     src/net/net.h:70: error: '::fcntl' has not been declared
+#  //     src/net/net.h:70: error: 'F_GETFL' was not declared in this scope
+#  // 原因很隐蔽 —— Windows 的 <winsock2.h> 会间接引入 <fcntl.h>，
+#  // 所以本地（Windows/MSYS2）怎么编都能过，一上Linux CI 就挂。
+#  // **「本地能编译」不等于「跨平台能编译」**，头文件依赖必须显式声明。
+#  include <fcntl.h>
 #  define close_socket close
 #  define last_error() errno
 #  define ERR_WOULDBLOCK EWOULDBLOCK
