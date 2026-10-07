@@ -103,7 +103,9 @@ RollbackResult run_rollback(std::uint64_t seed, int delay, int frames,
   std::vector<Pending> pending_pkts;
   pending_pkts.reserve(static_cast<std::size_t>(frames) * kMaxPlayers);
 
-  for (int t = 0; t < frames; ++t) {
+  // 主循环跑 frames-1 帧，最后一帧留给收尾阶段（见下方注释）
+  const int main_frames = frames - 1;
+  for (int t = 0; t < main_frames; ++t) {
     // 1. 投递所有「已到达」的在途包（按 arrive_tick 判断）
     for (std::size_t i = 0; i < pending_pkts.size();) {
       if (pending_pkts[i].arrive_tick <= t) {
@@ -127,6 +129,51 @@ RollbackResult run_rollback(std::uint64_t seed, int delay, int frames,
     }
     // 3. 推进一帧
     session.advance();
+  }
+
+  // ==================================================================
+  // 【测试设计修正·关键】收尾阶段：让「输入全部到齐」
+  // ==================================================================
+  //
+  // 这个测试要证明的命题是：
+  //     输入全部到齐后，回滚重算的结果 == 零延迟模拟的结果。
+  //
+  // 要让这个比较成立，收尾时两侧的**输入集合必须完全一致**。
+  // 主循环跑完 t = frames-1 就退出，但那一刻发出的延迟包
+  // arrive_tick = frames-1+delay **永远不会被投递**（没人再推进）。
+  // 于是实验组最后若干帧必然含预测，基准组却是真实输入 ——
+  // 两者本来就不该相等。
+  //
+  //【曾经的误判】这个缺陷存在时，测试结果与 frames 参数**无单调关系**：
+  //     2000 过 / 2200 失败 / 2400 过 / 2800 失败 / 3000 失败
+  //看起来像随机的功能 bug，实际取决于「末delay 帧恰好有没有状态变化」。
+  // 用 rollback_diff 工具逐字段对比后确认：收尾后**只有 x 坐标差18
+  // （正好一步移动）**，hp/mp/cooldown/damage/alive/rng_state 全部一致 ——
+  // 那一步正是predict() 用「12 帧前的历史同相位」猜出来的移动方向。
+  //
+  // 正解（当前实现）：主循环跑 frames-1帧，收尾时
+  //   ① 投递所有在途包（补齐历史帧的输入）
+  //   ② 显式补上「最后一帧全部玩家的输入」
+  //      （它本该在 frames-1 时刻发出，但主循环已结束）
+  //   ③ advance 一次
+  // 此时所有帧的输入都真实到达，两侧输入集合一致，比较才公平。
+  for (std::size_t i = 0; i < pending_pkts.size();) {
+    const Pending pd = pending_pkts[i];
+    session.on_input(
+        pd.player, pd.frame,
+        inputs[static_cast<std::size_t>(pd.frame)][static_cast<std::size_t>(pd.player)]);
+    pending_pkts.erase(pending_pkts.begin() + static_cast<long>(i));
+  }
+  for (int p = 0; p < kMaxPlayers; ++p) {
+    session.on_input(p, main_frames,
+                     inputs[static_cast<std::size_t>(main_frames)]
+                           [static_cast<std::size_t>(p)]);
+  }
+  session.advance();
+
+  if (!pending_pkts.empty()) {
+    std::printf("【警告】收尾后仍有 %zu 个包未投递（arrive_tick 计算可能有误）\n",
+                pending_pkts.size());
   }
   auto t1 = std::chrono::steady_clock::now();
 

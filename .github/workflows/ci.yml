@@ -44,13 +44,30 @@ jobs:
       # 这一步是本项目 CI 的核心价值 ——
       # 用 5 种优化级别编译同一份模拟核心，逐帧比对状态哈希。
       # 若某级别因 UB 产生不同结果，这一步会失败。
+      # 提取最后一帧的哈希。
+      #
+      # 【踩坑·CI 里最容易出现的静默失效】
+      # 最初写的是 `grep FINAL_HASH | awk '{print $2}'`，
+      # 但 determinism_test 的实际输出格式是 `F001999=<hash>`（F + 帧号 + 等号），
+      # 没有 "FINAL_HASH" 这个字符串 —— grep 匹配不到，HASH 变量恒为空。
+      # 于是「空 == 空」的比较永远成立，**这道最核心的验证实际上什么都没做**，
+      # 却显示为通过。
+      #
+      # 教训：CI 里的提取逻辑必须**先在本地跑一次看真实输出**，
+      # 不能凭印象写 grep 模式。
       - name: 确定性验证（-O0/-O1/-O2/-O3/-Os 逐帧哈希比对）
         run: |
           set -e
           REF=""
           for OPT in O0 O1 O2 O3 Os; do
             g++ -$OPT -std=c++20 -pthread -Isrc src/determinism_test.cpp -o /tmp/det_$OPT
-            HASH=$(/tmp/det_$OPT $OPT 12345 2000 | grep FINAL_HASH | awk '{print $2}')
+            # 末行形如 F001999=c0edaf2b2014fa6a
+            HASH=$(/tmp/det_$OPT $OPT 12345 2000 | grep -oE '^F[0-9]+=[0-9a-f]{16}$' | tail -1 | cut -d= -f2)
+            if [ -z "$HASH" ]; then
+              echo "::error::无法从输出中提取哈希（grep 模式可能已失效）"
+              /tmp/det_$OPT $OPT 12345 2000 | tail -3
+              exit 1
+            fi
             echo "  -$OPT  -> $HASH"
             if [ -z "$REF" ]; then
               REF=$HASH
@@ -103,8 +120,12 @@ jobs:
       - run: clang++ -O2 -std=c++20 -pthread -Isrc src/determinism_test.cpp -o /tmp/det_clang
       - name: Clang 下确定性哈希（应与 GCC 相同 —— 跨编译器一致性）
         run: |
-          GCC_HASH=$(g++ -O2 -std=c++20 -pthread -Isrc src/determinism_test.cpp -o /tmp/det_gcc && /tmp/det_gcc O2 12345 2000 | grep FINAL_HASH | awk '{print $2}')
-          CLANG_HASH=$(/tmp/det_clang O2 12345 2000 | grep FINAL_HASH | awk '{print $2}')
+          GCC_HASH=$(g++ -O2 -std=c++20 -pthread -Isrc src/determinism_test.cpp -o /tmp/det_gcc && /tmp/det_gcc O2 12345 2000 | grep -oE '^F[0-9]+=[0-9a-f]{16}$' | tail -1 | cut -d= -f2)
+          CLANG_HASH=$(/tmp/det_clang O2 12345 2000 | grep -oE '^F[0-9]+=[0-9a-f]{16}$' | tail -1 | cut -d= -f2)
+          if [ -z "$GCC_HASH" ] || [ -z "$CLANG_HASH" ]; then
+            echo "::error::哈希提取失败"
+            exit 1
+          fi
           echo "GCC  : $GCC_HASH"
           echo "Clang: $CLANG_HASH"
           if [ "$GCC_HASH" != "$CLANG_HASH" ]; then
