@@ -26,6 +26,7 @@ build() {
 echo "[build] 编译可执行文件..."
 build determinism  determinism_test.cpp
 build rollback     rollback_test.cpp
+build rollbackdiff rollback_diff.cpp
 build bandwidth    bandwidth_test.cpp
 build replaytest   replay_test.cpp
 build multiroom    multi_room_test.cpp

@@ -18,9 +18,10 @@
 //     让人能直接看出「哪一帧的哪个玩家用错了输入」。
 //
 // 用法:
-//   ./rollback_diff <seed> <delay> <frames> <delayed_players>
+//   ./rollback_diff <seed> <delay> <frames> <delayed_players> [snapshot_cap]
 // 例:
-//   ./rollback_diff 999 3 5001
+//   ./rollback_diff 999 3 5001            # 默认快照环64 帧
+//   ./rollback_diff 999 3 5001 1 16# 缩小快照环，测回滚深度不足
 // ============================================================================
 
 #include <cstdio>
@@ -86,17 +87,15 @@ int main(int argc, char** argv) {
   const int delay = argc > 2 ? std::atoi(argv[2]) : 3;
   const int frames = argc > 3 ? std::atoi(argv[3]) : 5001;
   const int delayed = argc > 4 ? std::atoi(argv[4]) : 1;
-  // 第 5 参数：kPeriod 覆盖（用于隔离 predict 策略的影响）
-  //   0= 极小（相当于总是走 fallback）  1 = 原值 12
-  const int kPeriodOverride = argc > 5 ? std::atoi(argv[5]) : 1;
+  // 第 5 参数：快照环深度（用于测「回滚深度不足」的影响，默认 64）
+  const int snap_cap = argc > 5 ? std::atoi(argv[5]) : 64;
 
   std::printf("============================================================\n");
   std::printf(" 回滚收敛性观测工具\n");
   std::printf("============================================================\n");
   std::printf(" seed=%llu delay=%d 帧 frames=%d 延迟玩家=%d\n\n",
               (unsigned long long)seed, delay, frames, delayed);
-  std::printf(" kPeriod 覆盖  : %d（%s）\n\n", kPeriodOverride,
-              kPeriodOverride == 0 ? "已禁用历史同相位" : "原值 12");
+  std::printf(" 快照环深度    : %d 帧\n\n", snap_cap);
 
   // 预生成全部输入（与 rollback_test 完全一致）
   std::vector<std::vector<Command>> inputs(static_cast<std::size_t>(frames));
@@ -107,7 +106,7 @@ int main(int argc, char** argv) {
           gen_command(seed, t, p);
   }
 
-  RollbackSession session(seed);
+  RollbackSession session(seed, static_cast<std::size_t>(snap_cap));
   World ideal = make_world(seed);
   std::vector<Pending> pending;
   pending.reserve(static_cast<std::size_t>(frames) * kMaxPlayers);
@@ -301,7 +300,7 @@ int main(int argc, char** argv) {
     // 基准组补一步 —— s2.advance() 会让 tick 到 first_div+1
     step(ref, inputs[static_cast<std::size_t>(first_div)].data());
     // 重跑回滚组到 first_div
-    RollbackSession s2(seed);
+    RollbackSession s2(seed, static_cast<std::size_t>(snap_cap));
     std::vector<Pending> pend;
     for (int t = 0; t < first_div; ++t) {
       for (std::size_t i = 0; i < pend.size();) {
