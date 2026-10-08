@@ -143,7 +143,7 @@ void run_client(const Options& opt, int client_id, ClientResult& out) {
                reinterpret_cast<char*>(&one), sizeof(one));
   sockaddr_in tcp_srv = make_addr(kTcpPort);
   if (::connect(tcp, reinterpret_cast<sockaddr*>(&tcp_srv),
-                sizeof(tcp_srv)) == SOCKET_ERROR) {
+                sizeof(tcp_srv)) == -1) {
     std::fprintf(stderr, "[c%d] TCP connect 失败 err=%d（服务端未启动？）\n",
                  client_id, SOCK_ERROR);
     close_socket(tcp);
@@ -268,7 +268,7 @@ void run_client(const Options& opt, int client_id, ClientResult& out) {
                              static_cast<int>(pkt.size()), 0,
                              reinterpret_cast<sockaddr*>(&udp_srv),
                              sizeof(udp_srv));
-      if (n == SOCKET_ERROR) {
+      if (n == -1) {
         send_fail.fetch_add(1, std::memory_order_relaxed);
       } else {
         sent.fetch_add(1, std::memory_order_relaxed);
