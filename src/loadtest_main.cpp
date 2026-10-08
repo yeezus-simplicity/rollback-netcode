@@ -121,7 +121,7 @@ void run_client(const Options& opt, int client_id, ClientResult& out) {
   //   **本文件从未在非 Windows 平台上被编译过**。
   // 教训：写网络代码一律用 net.h 的跨平台封装，不要直接碰平台专有符号。
   int udp = ::socket(AF_INET, SOCK_DGRAM, 0);
-  if (udp < 0) {
+  if (socket_failed(udp)) {
     std::fprintf(stderr, "[c%d] udp socket failed (err=%d)\n",
                  client_id, SOCK_ERROR);
     return;
@@ -134,7 +134,7 @@ void run_client(const Options& opt, int client_id, ClientResult& out) {
   // TCP connect 必然被拒(err=10061)。同一时刻最小化探针程序能连上，
   // 靠「两版代码对照」才定位到 —— 教训：**地址结构不能跨协议复用**。
   int tcp = ::socket(AF_INET, SOCK_STREAM, 0);
-  if (tcp < 0) {
+  if (socket_failed(tcp)) {
     close_socket(udp);
     return;
   }
@@ -142,8 +142,8 @@ void run_client(const Options& opt, int client_id, ClientResult& out) {
   ::setsockopt(tcp, IPPROTO_TCP, TCP_NODELAY,
                reinterpret_cast<char*>(&one), sizeof(one));
   sockaddr_in tcp_srv = make_addr(kTcpPort);
-  if (::connect(tcp, reinterpret_cast<sockaddr*>(&tcp_srv),
-                sizeof(tcp_srv)) == -1) {
+  if (socket_failed(::connect(tcp, reinterpret_cast<sockaddr*>(&tcp_srv),
+                             sizeof(tcp_srv)))) {
     std::fprintf(stderr, "[c%d] TCP connect 失败 err=%d（服务端未启动？）\n",
                  client_id, SOCK_ERROR);
     close_socket(tcp);
@@ -268,7 +268,7 @@ void run_client(const Options& opt, int client_id, ClientResult& out) {
                              static_cast<int>(pkt.size()), 0,
                              reinterpret_cast<sockaddr*>(&udp_srv),
                              sizeof(udp_srv));
-      if (n == -1) {
+      if (socket_failed(n)) {
         send_fail.fetch_add(1, std::memory_order_relaxed);
       } else {
         sent.fetch_add(1, std::memory_order_relaxed);

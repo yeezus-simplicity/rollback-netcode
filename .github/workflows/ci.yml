@@ -59,6 +59,37 @@ jobs:
           fi
           echo "  build.sh 行尾 LF ✓"
 
+      # 【防回归门禁·禁止平台专有符号混入业务代码】
+      # 这四轮 CI 失败（SOCKET / INVALID_SOCKET / closesocket / SOCKET_ERROR）
+      # 全部源于同一模式：**Windows 的 winsock2.h 会被 Windows 编译环境顺手满足，
+      # 而 Linux 上没有这些名字**，于是本地绿灯、CI 红灯。
+      #
+      # 这些符号的正确做法全部是 net.h 里的跨平台封装：
+      #   close_socket(x) / last_error() / SOCK_ERROR / socket_failed(rc)
+      #
+      # 在 CI 里静态拦截，比「等编译报错」早一步 —— 编译只会在
+      # 该文件恰好被编译时才报错，而 grep 覆盖全仓库。
+      - name: 防回归门禁（业务代码禁止平台专有符号）
+        run: |
+          set -e
+          # net.h 是封装定义处本身，允许出现；注释行也排除。
+          BAD=$(grep -rnEi '\b(wsastartup|wsacleanup|wsagetlasterror|socket_error|invalid_socket|closesocket|ioctlsocket|wsadescrerror|wsaioctl|wsaevent)\b' src/ \
+                --include=*.cpp --include=*.h \
+                | grep -v '^src/net/net\.h:' \
+                | grep -vE ':[0-9]+:[[:space:]]*(//|\*|/\*)' \
+                | grep -vE '//.*\b(SOCKET|closesocket)' || true)
+          if [ -n "$BAD" ]; then
+            echo "::error::业务代码中出现 Windows-only符号（Linux 上不存在）"
+            echo "$BAD"
+            echo ""
+            echo "改用 net.h 的跨平台封装："
+            echo "  ::closesocket(x)→ close_socket(x)"
+            echo "  WSAGetLastError()      -> SOCK_ERROR"
+            echo "  == SOCKET_ERROR        -> socket_failed(rc)"
+            exit 1
+          fi
+          echo "  无平台专有符号 ✓"
+
       - name: 编译（gcc）
         run: |
           g++ -O2 -std=c++20 -pthread -Isrc src/determinism_test.cpp -o /tmp/det

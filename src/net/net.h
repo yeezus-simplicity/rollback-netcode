@@ -83,6 +83,24 @@ inline int set_nonblock(int fd) {
 }
 #endif
 
+// ===================================================================
+// socket 调用失败判据 —— 收口所有「是否出错」的判断
+// ===================================================================
+//
+// 【为什么需要这个宏】
+// Windows 的 socket 函数失败返回 SOCKET_ERROR（值 -1），
+// POSIX 返回 -1，两者数值其实一致，**但名字不同**：
+// Windows 只有 winsock2.h 里的 SOCKET_ERROR，Linux 上根本没有这个名字。
+//
+// 于是产生了这四轮反复出现的错误：
+//   业务代码直接写 SOCKET_ERROR → Windows 编得过，Linux 报
+//   'SOCKET_ERROR' was not declared in this scope
+//
+// 业务层只需记住一个 socket_failed()，平台差异全部关在本文件内。
+// **新增网络代码时不要直接写 -1 / SOCKET_ERROR / WSAGetLastError，统一用下面两个。**
+#define socket_failed(rc) ((rc) < 0)
+#define last_error_code() SOCK_ERROR
+
 namespace synq {
 
 // 每个玩家的连接状态

@@ -210,7 +210,14 @@ class LatencyHistogram {
     if (msb < kPrecision) return static_cast<std::uint32_t>(us);  // 小值线性精确
     const int shift = msb - kPrecision;
     const std::uint64_t sub = (us >> shift) & ((1ULL << kPrecision) - 1);
-    return static_cast<std::uint32_t>((msb << kPrecision) | sub);
+    const std::uint32_t idx =
+        static_cast<std::uint32_t>((msb << kPrecision) | sub);
+    // 【越界防护】msb 最大 63 → idx 最大 63<<3|7 = 511，
+    // 而 kBuckets 只有 256。若不钳制，us >= 2^28us(≈268s) 会越界写 counts_[]，
+    // 踩坏内存（这是 UB，不一定立刻崩）。
+    // 延迟直方图的量级是微秒，2^28us 已远超任何合理监控上限，
+    // 统一落到最后一个桶即可（不丢计数、不越界）。
+    return idx < kBuckets ? idx : static_cast<std::uint32_t>(kBuckets - 1);
   }
 
   // 【必须与 bucket_of 严格互逆】
@@ -221,15 +228,28 @@ class LatencyHistogram {
   //
   // 编码：idx = (msb << K) | sub，桶区间 = [2^msb + sub*2^(msb-K), +2^(msb-K) - 1]
   // 反解：msb = idx >> K，sub = idx & (2^K - 1)，unit = 2^(msb - K)
+  //
+  // 【踩坑·线性区的上界是 2^K-1，不是 K】
+  // 解码端原来写`if (idx < kPrecision)`，但编码端
+  // `bucket_of` 的条件是 `if (msb < kPrecision)`，两者语义不同：
+  //   msb 是「最高位下标」，idx 是「桶号」。
+  // kPrecision=3 时，msb∈{0,1,2} 覆盖 us∈[0,8)，
+  // 于是**线性区的 idx 上界是 7（2^K-1），不是 3**。
+  // 写成 idx < kPrecision 会让 idx∈[3,7] 误入指数分支，
+  // 反解出 msb = idx>>3 = 0，再拿 1ULL << (0-3) 等表达式算出垃圾下界：
+  //     v=3 -> lo=6917529027641081857   (真实值 3 完全落在桶外)
+  //     v=4 -> lo=9223372036854775809   (2^63+1，uint64 溢出)
+  // Windows 下这个测试也是失败的，只是之前没在Linux 上跑过完整验证。
+  // **编码端与解码端的边界条件必须用同一个表达式。**
   static std::uint64_t bucket_upper_bound(int idx) {
-    if (idx < kPrecision) return idx;              // 线性桶
+    if (idx < (1 << kPrecision)) return idx;       // 线性桶：idx∈[0, 2^K-1]
     const int msb = idx >> kPrecision;
     const std::uint64_t sub = static_cast<std::uint64_t>(idx & ((1 << kPrecision) - 1));
     const std::uint64_t unit = 1ULL << (msb - kPrecision);
     return (1ULL << msb) + (sub + 1) * unit - 1;
   }
   static std::uint64_t bucket_lower_bound(int idx) {
-    if (idx < kPrecision) return idx;
+    if (idx < (1 << kPrecision)) return idx;       // 与 upper 同一边界表达式
     const int msb = idx >> kPrecision;
     const std::uint64_t sub = static_cast<std::uint64_t>(idx & ((1 << kPrecision) - 1));
     return (1ULL << msb) + sub * (1ULL << (msb - kPrecision));
