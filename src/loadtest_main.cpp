@@ -109,10 +109,21 @@ void run_client(const Options& opt, int client_id, ClientResult& out) {
   }
 
   // ---- UDP：发送输入包 ----
-  SOCKET udp = ::socket(AF_INET, SOCK_DGRAM, 0);
-  if (udp == INVALID_SOCKET) {
+  // 【跨平台】socket 句柄在 Windows 是 SOCKET(uintptr_t)，POSIX 是 int fd。
+  // 统一用 int 存（POSIX 侧本来就是 int），关闭/取错一律走 net.h 的
+  // close_socket / last_error 封装 —— server_main.cpp 也是这么写的。
+  //
+  // 【踩坑·只在 Linux 暴露】初版直接写了 Windows API
+  //   （SOCKET / INVALID_SOCKET / closesocket / WSAGetLastError / SOCKET_ERROR），
+  //   在 Windows 上怎么编都能过，一上 Linux CI 全是
+  //   error: 'SOCKET' was not declared in this scope。
+  // 与 net.h 漏 <fcntl.h> 是同一类问题：
+  //   **本文件从未在非 Windows 平台上被编译过**。
+  // 教训：写网络代码一律用 net.h 的跨平台封装，不要直接碰平台专有符号。
+  int udp = ::socket(AF_INET, SOCK_DGRAM, 0);
+  if (udp < 0) {
     std::fprintf(stderr, "[c%d] udp socket failed (err=%d)\n",
-                 client_id, WSAGetLastError());
+                 client_id, SOCK_ERROR);
     return;
   }
   sockaddr_in udp_srv = make_addr(kUdpPort);
@@ -122,21 +133,21 @@ void run_client(const Options& opt, int client_id, ClientResult& out) {
   // 【踩坑】初版复用了 udp_srv 去 connect TCP，导致端口还是 18088(UDP)，
   // TCP connect 必然被拒(err=10061)。同一时刻最小化探针程序能连上，
   // 靠「两版代码对照」才定位到 —— 教训：**地址结构不能跨协议复用**。
-  SOCKET tcp = ::socket(AF_INET, SOCK_STREAM, 0);
-  if (tcp == INVALID_SOCKET) {
-    ::closesocket(udp);
+  int tcp = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (tcp < 0) {
+    close_socket(udp);
     return;
   }
   int one = 1;
-  ::setsockopt(static_cast<SOCKET>(tcp), IPPROTO_TCP, TCP_NODELAY,
+  ::setsockopt(tcp, IPPROTO_TCP, TCP_NODELAY,
                reinterpret_cast<char*>(&one), sizeof(one));
   sockaddr_in tcp_srv = make_addr(kTcpPort);
   if (::connect(tcp, reinterpret_cast<sockaddr*>(&tcp_srv),
                 sizeof(tcp_srv)) == SOCKET_ERROR) {
     std::fprintf(stderr, "[c%d] TCP connect 失败 err=%d（服务端未启动？）\n",
-                 client_id, WSAGetLastError());
-    ::closesocket(tcp);
-    ::closesocket(udp);
+                 client_id, SOCK_ERROR);
+    close_socket(tcp);
+    close_socket(udp);
     return;
   }
   // 服务端 accept 后立即下发全量状态，读掉它避免 TCP 缓冲区堆积
@@ -172,7 +183,7 @@ void run_client(const Options& opt, int client_id, ClientResult& out) {
     std::vector<std::uint8_t> buf(8192);
     while (!stop.load(std::memory_order_relaxed)) {
       struct timeval tv{0, 100000};   // 100ms 超时，便于响应 stop
-      ::setsockopt(static_cast<SOCKET>(tcp), SOL_SOCKET, SO_RCVTIMEO,
+      ::setsockopt(tcp, SOL_SOCKET, SO_RCVTIMEO,
                    reinterpret_cast<char*>(&tv), sizeof(tv));
       int n = ::recv(tcp, reinterpret_cast<char*>(buf.data()),
                      static_cast<int>(buf.size()), 0);
@@ -278,8 +289,8 @@ void run_client(const Options& opt, int client_id, ClientResult& out) {
 
   stop.store(true, std::memory_order_relaxed);
   ack_reader.join();
-  ::closesocket(tcp);
-  ::closesocket(udp);
+  close_socket(tcp);
+  close_socket(udp);
   shutdown_net();
 
   // 填充结果（主进程聚合）

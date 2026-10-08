@@ -41,7 +41,7 @@ int make_udp_listener(int port) {
   int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
   if (fd < 0) return -1;
   auto* so = reinterpret_cast<char*>(&one_);
-  ::setsockopt(static_cast<SOCKET>(fd), SOL_SOCKET, SO_REUSEADDR, so,
+  ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, so,
                sizeof(one_));
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
@@ -58,7 +58,7 @@ int make_tcp_listener(int port) {
   int fd = ::socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) return -1;
   auto* so = reinterpret_cast<char*>(&one_);
-  ::setsockopt(static_cast<SOCKET>(fd), SOL_SOCKET, SO_REUSEADDR, so,
+  ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, so,
                sizeof(one_));
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
@@ -209,7 +209,7 @@ int main(int argc, char** argv) {
   std::mutex tcp_mutex;
   std::thread tcp_thread([&] {
     struct timeval tv{0, 50000};
-    ::setsockopt(static_cast<SOCKET>(tcp_fd), SOL_SOCKET, SO_RCVTIMEO,
+    ::setsockopt(tcp_fd, SOL_SOCKET, SO_RCVTIMEO,
                  reinterpret_cast<char*>(&tv), sizeof(tv));
     while (running.load(std::memory_order_relaxed)) {
       sockaddr_in cli{};
@@ -217,7 +217,7 @@ int main(int argc, char** argv) {
       int cfd = ::accept(tcp_fd, reinterpret_cast<sockaddr*>(&cli), &cl);
       if (cfd < 0) continue;
       auto* so = reinterpret_cast<char*>(&one_);
-      ::setsockopt(static_cast<SOCKET>(cfd), IPPROTO_TCP, TCP_NODELAY, so,
+      ::setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, so,
                    sizeof(one_));
       {
         std::lock_guard<std::mutex> lk(tcp_mutex);
@@ -237,7 +237,7 @@ int main(int argc, char** argv) {
     std::uint8_t buf[2048];
     while (running.load(std::memory_order_relaxed)) {
       struct timeval tv{0, 10000};
-      ::setsockopt(static_cast<SOCKET>(udp_fd), SOL_SOCKET, SO_RCVTIMEO,
+      ::setsockopt(udp_fd, SOL_SOCKET, SO_RCVTIMEO,
                    reinterpret_cast<char*>(&tv), sizeof(tv));
       sockaddr_in from{};
       socklen_t fl = sizeof(from);

@@ -27,7 +27,7 @@ jobs:
       - name: 安装编译环境
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++ make
+          sudo apt-get install -y g++
 
       # 【踩坑·执行权限与行尾】
       # 最初 build.sh 在仓库里的模式是 100644（非可执行），而最后一步
@@ -70,6 +70,22 @@ jobs:
           g++ -O2 -std=c++20 -pthread -Isrc src/histogram_test.cpp    -o /tmp/hist
           g++ -O2 -std=c++20 -pthread -Isrc src/config_test.cpp       -o /tmp/cfg
           g++ -O2 -std=c++20 -pthread -Isrc src/loadtest_main.cpp     -o /tmp/lt
+
+      # 【踩坑·编译覆盖盲区】
+      # 最初 CI 只编译 9 个程序，漏掉了 4 个：
+      #   rollback_diff.cpp / client/visual_demo.cpp / server_main.cpp / export_trace.cpp
+      # 结果 server_main.cpp 里的 static_cast<SOCKET>(fd) 一直没被 Linux 编译到，
+      # 直到某天扩了CI 范围才暴露出来。
+      # —— 「没被 CI 编译」= 「问题不会被发现」，而不是「没问题」。
+      #
+      # 这里补齐到与 build.sh 一致的全部程序，
+      # 编译**成功即可**，不运行（server/visual_demo 是交互式长驻程序）。
+      - name: 编译其余 4 个程序（仅检查，不运行）
+        run: |
+          g++ -O2 -std=c++20 -pthread -Isrc src/rollback_diff.cpp        -o /tmp/rbdiff
+          g++ -O2 -std=c++20 -pthread -Isrc src/client/visual_demo.cpp   -o /tmp/vdemo
+          g++ -O2 -std=c++20 -pthread -Isrc src/server_main.cpp          -o /tmp/srv
+          g++ -O2 -std=c++20 -pthread -Isrc src/export_trace.cpp         -o /tmp/exp
 
       # 这一步是本项目 CI 的核心价值 ——
       # 用 5 种优化级别编译同一份模拟核心，逐帧比对状态哈希。
