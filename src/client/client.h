@@ -56,6 +56,7 @@ class ClientPredictor {
   // 本地玩家在 tick 的输入（立即本地生效，无延迟 —— 这就是"手感跟手"）
   void on_local_input(std::int32_t tick, int player, const Command& cmd) {
     local_inputs_.push_back({tick, player, cmd});
+    remember_real(player, cmd);
   }
 
   // 远端玩家的输入（经过网络延迟才到达 —— 真实客户端就是这样：
@@ -66,6 +67,7 @@ class ClientPredictor {
   // 演示不出「预测 → 纠正」的回滚过程（那样的一致率 100% 反而没意义）。
   void on_remote_input(std::int32_t tick, int player, const Command& cmd) {
     remote_inputs_.push_back({tick, player, cmd});
+    remember_real(player, cmd);
   }
 
   // 收到服务端权威帧的哈希（网络层只需传 tick + 状态哈希，无需整个 World）
@@ -300,22 +302,36 @@ class ClientPredictor {
     return false;
   }
 
-  // 远程玩家预测：历史同相位
+  // 远程玩家预测：**与服务端共用 core/predictor.h 的同一份策略**
   //
-  // 【关键·必须与服务端 RollbackSession::predict 完全一致】
-  // 帧同步的正确性前提：客户端与服务端对「缺失输入」的补全方式完全相同，
-  // 否则即使输入最终全部到齐，两边的历史状态也永远对不上。
-  // 服务端查 frames_（已收到的输入表），客户端查 remote_inputs_（收到的远端输入）
-  // + local_inputs_（自己的输入）—— 语义等价。
+  // 【关键·为什么改成共用】帧同步的正确性前提是两端对「缺失输入」的补全方式完全相同。
+  // 此前这里写着"必须与服务端完全一致"，但实际 fallback 是空操作 Command{}，
+  // 而服务端 fallback 是「重复上一次输入」—— 两边都自认为一致，谁也没错。
+  // 现在同相位查找用 predict_same_phase()、fallback 用 predict_fallback()，
+  // 与服务端**同一份代码**，不可能再漂移。
+  //
+  // 【本端的 is_real】客户端两张表（local_inputs_ / remote_inputs_）都只存
+  // **真实收到**的输入，从不写入预测值，因此 is_real 恒为 true。
   Command predict_remote(std::int32_t tick, int player) const {
-    constexpr std::int32_t kPeriod = 12;   // 与服务端 kPeriod 一致
-    for (std::int32_t back = kPeriod; back <= tick; back += kPeriod) {
-      std::int32_t src = tick - back;
-      Command c;
-      if (find_input(remote_inputs_, src, player, c)) return c;
-      if (find_input(local_inputs_, src, player, c)) return c;
-    }
-    return Command{};   // 与服务端 fallback 一致
+    Command c;
+    const bool hit = predict_same_phase(
+        mode_, tick,
+        [&](std::int32_t src, Command& out) {
+          return find_input(remote_inputs_, src, player, out) ||
+                 find_input(local_inputs_, src, player, out);
+        },
+        [](std::int32_t) { return true; },  // 见上：两张表都只存真实输入
+        c);
+    if (hit) return c;
+    if (mode_ == PredictMode::kRealOnly)
+      return predict_fallback(last_real_cmd_[player], has_last_real_[player]);
+    return Command{};  // kLegacy：保持旧行为可复现
+  }
+
+  // 记录「真实收到」的输入（供预测 fallback 用；绝不记录预测值）
+  void remember_real(int player, const Command& cmd) {
+    last_real_cmd_[player] = cmd;
+    has_last_real_[player] = true;
   }
 
   World local_;
@@ -326,6 +342,10 @@ class ClientPredictor {
   CompressedSnapshotRing snapshots_;            // 本地历史快照（供回滚）
   std::int32_t confirmed_tick_ = 0;
   bool last_predicted_[kMaxPlayers] = {false, false, false, false};
+  // 与服务端共用的预测策略状态（默认 kIntentFirst，与服务端默认一致）
+  PredictMode mode_ = PredictMode::kIntentFirst;
+  Command last_real_cmd_[kMaxPlayers];
+  bool has_last_real_[kMaxPlayers] = {false, false, false, false};
 };
 
 }  // namespace synq

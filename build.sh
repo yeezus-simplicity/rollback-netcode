@@ -67,6 +67,7 @@ build reconnect     reconnect_test.cpp
 build rollback_bound rollback_bound_test.cpp
 build multiroomnet  multiroom_net_test.cpp
 build bench         bench_main.cpp
+build prediction    prediction_test.cpp
 
 if [[ "$1" == "verify" ]]; then
   echo ""
@@ -142,6 +143,10 @@ if [[ "$1" == "verify" ]]; then
   echo ""
   echo "===== 12. 性能基准与不变量门禁 ====="
   "$OUT/bench" | grep -E "PASS|FAIL|BENCH" || true
+
+  echo ""
+  echo "===== 13. 输入预测策略（消除 #1）====="
+  "$OUT/prediction" | grep -E "参考上限|旧 同相位|同相位真实优先|意图持续优先|PREDICTION" || true
 fi
 
 if [[ "$1" == "server" ]]; then

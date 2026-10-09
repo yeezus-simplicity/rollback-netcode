@@ -445,6 +445,50 @@ jobs:
           fi
           echo "✓ 性能基准通过：算法不变量全过（线性性/正确性/增量编码），吞吐高于下限"
 
+  prediction:
+    name: 输入预测策略（消除已知限制 #1）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装编译环境
+        run: sudo apt-get update && sudo apt-get install -y g++
+
+      # 【为什么这个测试自带「理论上限」】
+      #   命中率是"越高越好"的指标，但没有参照就不知道好坏。所以测试先算玩家行为
+      #   序列的自相关 —— 即「完美知道上一帧真实输入」时的命中率，也就是任何
+      #   「重复上一帧」类策略的**天花板** —— 再报实测值，一眼看出还有多少空间。
+      #   这个参照立刻暴露了问题：首次实测只有 14.94%（上限 89.7%），据此查出
+      #   **回滚重算路径没有把重算后的输入写回输入表**（主推进路径是写回的），
+      #   导致"读上一帧输入"的预测永远读到回滚前的陈旧值。修复后 89.78%。
+      #
+      # 判定：程序自带 —— 新策略不得劣于旧策略，且三种模式的最终哈希都须等于
+      #       零延迟理想哈希（预测策略绝不能改变权威结果）。
+      - name: 编译并运行预测策略对照
+        run: |
+          set -e
+          g++ -O2 -std=c++20 -Wall -Wextra -pthread -Isrc src/prediction_test.cpp -o /tmp/pred
+          RC=0
+          /tmp/pred > /tmp/pred.log 2>&1 || RC=$?
+          cat /tmp/pred.log
+          if [ "$RC" != "0" ]; then
+            echo "::error::预测策略对照失败（rc=${RC}）"
+            exit 1
+          fi
+          if ! grep -q "PREDICTION_OK" /tmp/pred.log; then
+            echo "::error::未拿到 PREDICTION_OK（疑似空跑，或新策略劣于旧策略）"
+            exit 1
+          fi
+          # 防静默失效：必须真的跑出三策略对照与理论上限
+          if ! grep -q "意图持续优先" /tmp/pred.log; then
+            echo "::error::缺少策略对照输出（防静默失效）"
+            exit 1
+          fi
+          if ! grep -q "参考上限" /tmp/pred.log; then
+            echo "::error::缺少理论上限参照（防静默失效）"
+            exit 1
+          fi
+          echo "✓ 预测策略通过：意图持续优先命中率显著优于旧策略，且不影响最终权威状态"
+
   warnings:
     name: 编译告警门禁（-Wall -Wextra -Werror）
     runs-on: ubuntu-latest

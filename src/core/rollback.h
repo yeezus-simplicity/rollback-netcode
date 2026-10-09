@@ -35,6 +35,7 @@
 #include <deque>
 #include <vector>
 
+#include "core/predictor.h"
 #include "core/world.h"
 
 namespace synq {
@@ -130,6 +131,22 @@ class RollbackSession {
     FrameInputs& fi = frames_[i];
     // 已经补齐过就不再标记（避免重复回滚）
     if (fi.all_received()) return;
+
+    // 【#1 预测质量统计】该帧此前用预测推进过 → 记录「预测值 vs 真实值」是否命中。
+    // 必须放在下一行覆盖 fi.cmd[player] 之前 —— 那里才是当时真正使用的预测值。
+    if (fi.used_prediction[player] && frame < world_.tick) {
+      ++pred_total_;
+      if (fi.cmd[player] == cmd) ++pred_hits_;
+      // 移动字段单独统计：「画面跳不跳」主要由位置决定，攻击/施法字段是稀疏事件。
+      // 完全命中（4 字段全同）判据过严会低估预测质量，故两者都报。
+      if (fi.cmd[player].move_x == cmd.move_x &&
+          fi.cmd[player].move_y == cmd.move_y)
+        ++pred_move_hits_;
+    }
+    // 记录真实输入：预测 fallback 用它，**绝不能**用 last_cmd_（那可能是预测值）
+    last_real_cmd_[player] = cmd;
+    has_last_real_[player] = true;
+
     fi.frame = frame;
     fi.cmd[player] = cmd;
     fi.has[player] = true;
@@ -190,6 +207,28 @@ class RollbackSession {
   std::int64_t total_rollbacks() const { return total_rollbacks_; }
   std::int64_t total_resimulated() const { return total_resimulated_; }
   std::int64_t total_predicted() const { return total_predicted_; }
+
+  // 【#1 预测质量指标】预测命中率 = 预测值恰好等于真实值的比例。
+  // 这是「预测策略好不好」唯一有意义的度量：命中率越低，回滚时的修正幅度越大，
+  // 客户端看到的画面跳跃/拉扯越明显（回滚开销本身不受影响，见不变量门禁）。
+  std::int64_t pred_total() const { return pred_total_; }
+  std::int64_t pred_hits() const { return pred_hits_; }
+  std::int64_t pred_move_hits() const { return pred_move_hits_; }
+  double pred_hit_rate() const {
+    return pred_total_ > 0 ? static_cast<double>(pred_hits_) / pred_total_ : 0.0;
+  }
+  // 移动字段命中率（move_x/move_y 都对）
+  double pred_move_hit_rate() const {
+    return pred_total_ > 0
+               ? static_cast<double>(pred_move_hits_) / pred_total_
+               : 0.0;
+  }
+  void set_predict_mode(PredictMode m) { predict_mode_ = m; }
+  PredictMode predict_mode() const { return predict_mode_; }
+  // 策略来源分布：prev(意图持续) / phase(同相位) / fallback 各被采用多少次
+  std::int64_t pred_src_prev() const { return pred_src_prev_; }
+  std::int64_t pred_src_phase() const { return pred_src_phase_; }
+  std::int64_t pred_src_fallback() const { return pred_src_fallback_; }
   std::int32_t max_resimulated() const { return max_resimulated_; }
   double avg_resimulated() const {
     return total_rollbacks_ ? static_cast<double>(total_resimulated_) /
@@ -226,17 +265,75 @@ class RollbackSession {
     if (frames_.size() < need) frames_.resize(need);
   }
 
-  // 预测策略：优先用「历史同相位」输入（玩家操作常具周期性），
-  // 回退到「重复上一次输入」。
+  // 预测策略：同相位候选（只信真实输入）→ fallback「重复最近一次真实输入」。
+  // 策略本身在 core/predictor.h 里，与客户端共用同一份实现（此前两端各写一份，
+  // 注释都写着"必须一致"、实际 fallback 并不一致）。
+  //
+  // 【为什么 fallback 用「最近真实输入」而不是「上次使用过的输入」】
+  //   last_cmd_ 里可能存的是**预测值**——拿它当 fallback 等于用预测喂预测。
+  //   kLegacy 分支保留旧行为，仅用于 src/prediction_test.cpp 的新旧对照测量。
   Command predict(std::int32_t frame, int player) const {
-    constexpr std::int32_t kPeriod = 12;
-    for (std::int32_t back = kPeriod; back <= frame; back += kPeriod) {
-      std::int32_t src = frame - back;
-      std::size_t si = static_cast<std::size_t>(src - hist_base_);
-      if (si < frames_.size() && frames_[si].frame == src)
-        return frames_[si].cmd[player];
+    // 候选 1：重复「上一帧实际使用的输入」（意图持续性）—— 实测命中率最高
+    Command prev_cmd;
+    bool has_prev = false;
+    if (frame >= 1) {
+      const std::size_t pi = static_cast<std::size_t>(frame - 1 - hist_base_);
+      if (pi < frames_.size() && frames_[pi].frame == frame - 1) {
+        prev_cmd = frames_[pi].cmd[player];
+        has_prev = true;
+      }
     }
-    return last_cmd_[player];
+    // 候选 2：同相位历史（只信真实输入）
+    Command phase_cmd;
+    const bool has_phase = predict_same_phase(
+        PredictMode::kRealOnly, frame,
+        [&](std::int32_t src, Command& out) {
+          const std::size_t si = static_cast<std::size_t>(src - hist_base_);
+          if (si >= frames_.size() || frames_[si].frame != src) return false;
+          out = frames_[si].cmd[player];
+          return true;
+        },
+        [&](std::int32_t src) {
+          const std::size_t si = static_cast<std::size_t>(src - hist_base_);
+          return si < frames_.size() && frames_[si].frame == src &&
+                 frames_[si].has[player];  // 该帧该玩家是**真实**输入
+        },
+        phase_cmd);
+
+    switch (predict_mode_) {
+      case PredictMode::kLegacy: {
+        // 逐字复现旧行为（含"可能拿到预测值"的缺陷），仅供基准对比
+        Command c;
+        if (predict_same_phase(PredictMode::kLegacy, frame,
+                               [&](std::int32_t src, Command& out) {
+                                 const std::size_t si =
+                                     static_cast<std::size_t>(src - hist_base_);
+                                 if (si >= frames_.size() ||
+                                     frames_[si].frame != src)
+                                   return false;
+                                 out = frames_[si].cmd[player];
+                                 return true;
+                               },
+                               [](std::int32_t) { return false; }, c))
+          return c;
+        return last_cmd_[player];
+      }
+      case PredictMode::kRealOnly:
+        if (has_phase) return phase_cmd;
+        return predict_fallback(last_real_cmd_[player], has_last_real_[player]);
+      case PredictMode::kIntentFirst:
+      default:
+        if (has_prev) {
+          ++pred_src_prev_;      // 策略来源分布（可观测性）
+          return prev_cmd;       // 意图持续（命中率最高）
+        }
+        if (has_phase) {
+          ++pred_src_phase_;
+          return phase_cmd;      // 退而求其次：同相位真实输入
+        }
+        ++pred_src_fallback_;
+        return predict_fallback(last_real_cmd_[player], has_last_real_[player]);
+    }
   }
 
   // 检查是否有「早于当前 tick 且刚补齐输入」的帧 → 回滚
@@ -282,6 +379,12 @@ class RollbackSession {
           use[p] = fi.cmd[p];
         } else {
           use[p] = predict(f, p);
+          // ★ 必须写回：主推进路径（advance）会写回 fi.cmd[p] = use[p]，重算路径
+          //   此前漏了这一步 —— 结果 frames_[f].cmd[p] 一直保留**回滚前**的陈旧值，
+          //   而任何"读上一帧输入"的预测（意图持续 / 同相位）都会读到它，
+          //   把陈旧值一路复制下去。实测该缺陷使预测命中率从应有的 ~80% 掉到 15%
+          //   （见 src/prediction_test.cpp；这正是"用测量暴露实现缺陷"的价值）。
+          fi.cmd[p] = use[p];
           fi.used_prediction[p] = true;
           ++total_predicted_;
         }
@@ -319,6 +422,17 @@ class RollbackSession {
   std::vector<FrameInputs> frames_;
   std::int32_t hist_base_ = 0;
   Command last_cmd_[kMaxPlayers];
+  // ---- #1 预测策略与质量统计 ----
+  PredictMode predict_mode_ = PredictMode::kIntentFirst;  // 默认：实测最优策略
+  Command last_real_cmd_[kMaxPlayers];                  // 最近一次**真实**输入
+  bool has_last_real_[kMaxPlayers] = {false, false, false, false};
+  std::int64_t pred_total_ = 0;   // 曾用预测推进、随后收到真实输入的次数
+  std::int64_t pred_hits_ = 0;    // 其中「预测值 == 真实值」的次数（完全命中）
+  std::int64_t pred_move_hits_ = 0;  // 其中「移动字段相同」的次数
+  // 策略来源分布（predict() 是 const，故 mutable）：三种来源各被采用多少次
+  mutable std::int64_t pred_src_prev_ = 0;
+  mutable std::int64_t pred_src_phase_ = 0;
+  mutable std::int64_t pred_src_fallback_ = 0;
   std::int64_t total_rollbacks_ = 0;
   std::int64_t total_resimulated_ = 0;
   std::int64_t total_predicted_ = 0;
