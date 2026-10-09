@@ -34,6 +34,21 @@
 - `ConnOut::fd` 仅 accept worker 写一次、运行期只读、退出时由主线程统一
   `close_socket`（移除广播循环里与 sender 竞态的那次 `close_socket`）。
 
+## TSan 捕获的退出阶段竞态与挂死（CI 红 → 修复）
+
+推送后 CI 的 `tsan` job 报 `data race`：主线程在 **`join` 网络线程之前** 就
+`close(udp_fd)`，而 UDP recv worker 此时仍在 `recvfrom(udp_fd)`——关闭一个正被
+别的线程做 I/O 的 fd 既是竞态（Linux 上还可能导致该线程 syscall 落到被复用的新 fd）。
+
+**修复（顺序）**：`running=false` 后，**先 `join` 全部网络线程**
+（udp_workers / accept_thread / senders.workers / recv_threads），**再 `close` 任何 fd**。
+
+**顺带发现并修复的间歇性挂死**：监听 socket（`udp_fd` / `tcp_fd`）默认阻塞，worker 在
+`select` 返回「可读」后进入 `recvfrom`/`accept`，若无后续数据则**永久阻塞**，
+`join` 永远等不到（本地跑 300 帧偶发 RC=124 卡死）。修复：监听 socket 也设
+`set_nonblock`，worker 始终回到带超时（UDP 10ms / accept 500ms）的 `select` 来
+感知 `running=false` 并退出，**不再依赖 `close()` 打断**。
+
 ## 新增 / 修改文件
 
 - `src/net/concurrent.h`（**新建**）：`MpscQueue<T>` / `SpmcRing<T, N>` 无锁原语，
@@ -46,11 +61,13 @@
 
 ## 验证
 
-- **本地**（Windows MSYS2 g++ 15.2.0）：200/300/600 帧两种模式均 RC=0 干净退出，
-  4 个 TCP 连接全部接入、ACK 流转正常；全部 13 个 `build.sh` 目标编译通过。
-- **CI（GitHub Linux runner）**：`tsan` job 以 `-fsanitize=thread` 编译并
-  `slow_tcp=1` 短跑，**全绿，未报告 data race**；`clang` 可移植性 job 通过。
-- CI 防回归门禁 grep 对 `src/` 零命中（仅 `net.h` 白名单封装可用）。
+- **本地**（Windows MSYS2 g++ 15.2.0）：修复后 200/300/600 帧两种模式（含 `slow_tcp=1`
+  慢客户端）**多次跑均 RC=0 干净退出**，无挂死；4 个 TCP 连接全部接入、ACK 流转正常；
+  全部 13 个 `build.sh` 目标编译通过。
+- **CI（GitHub Linux runner）**：`tsan` job 以 `-fsanitize=thread` 编译并 `slow_tcp=1`
+  短跑，**曾报 data race（已修复）**；重新推送后应转绿。本沙箱无法跑真 Linux/TSan，
+  最终以 CI 该 job 复验为准。
+- CI 防回归门禁 grep 对 `src/` 零命中（`loadtest_main.cpp` 中的命中行是注释，被注释排除规则跳过）。
 
 ## 诚实保留（仍未做）
 

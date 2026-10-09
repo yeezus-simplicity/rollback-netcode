@@ -62,6 +62,7 @@ int one_ = 1;
 int make_udp_listener(int port) {
   int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
   if (fd < 0) return -1;
+  set_nonblock(fd);  // 非阻塞：worker 退出时（running=false）不依赖 close() 打断 recvfrom
   auto* so = reinterpret_cast<char*>(&one_);
   ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, so, sizeof(one_));
   sockaddr_in addr{};
@@ -78,6 +79,7 @@ int make_udp_listener(int port) {
 int make_tcp_listener(int port) {
   int fd = ::socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) return -1;
+  set_nonblock(fd);  // 非阻塞：accept worker 退出时不依赖 close() 打断 accept
   auto* so = reinterpret_cast<char*>(&one_);
   ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, so, sizeof(one_));
   sockaddr_in addr{};
@@ -546,16 +548,26 @@ int main(int argc, char** argv) {
 
   // ---- 优雅退出 ----
   running = false;
-  close_socket(udp_fd);
-  close_socket(tcp_fd);
+
+  // 1) 先 join 全部网络线程。各 worker/线程在 running=false 后最多等待一个
+  //    select 超时（UDP recv 10ms / accept 500ms / 连接 recv 10ms / sender 200us）
+  //    即自行退出；join 完成意味着没有任何线程再对下列 fd 做 I/O，从而消除
+  //    「主线程 close ↔ 工作线程 recvfrom/accept/recv」的竞态
+  //    （ThreadSanitizer 曾在此报 data race：main close(udp_fd) vs worker recvfrom）。
   for (auto& t : udp_workers) t.join();
   accept_thread.join();
   for (auto& t : senders.workers) t.join();
-  // 关闭各连接 socket（使对端 TCP 读线程 recv 返回 0 而退出）
-  for (auto* c : all_conns) close_socket(c->fd);
-  // 等待客户端 TCP 读线程退出后，统一回收客户端 socket
-  for (auto& b : bots) b.stop();
   for (auto& t : recv_threads) t.join();
+
+  // 2) 所有网络线程已退出，此刻关闭任何 fd 都安全，无并发 I/O。
+  close_socket(udp_fd);
+  close_socket(tcp_fd);
+  for (auto* c : all_conns) close_socket(c->fd);
+
+  // 3) 通知客户端（bot）读线程退出并回收连接对象。
+  //    bot 读线程在服务器侧关闭 c->fd 后 recv 返回 0 自然退出；
+  //    stop() 内会 join 其 tcp_thread，确保 bot 对象析构前线程已结束。
+  for (auto& b : bots) b.stop();
   for (auto* c : all_conns) delete c;
 
   // ---- 报告 ----

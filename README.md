@@ -668,7 +668,7 @@ synq/
 |---|---|---|
 | 1 | **预测策略较简单** | 仅「历史同相位 + 重复上次」。工业级会用玩家行为模型，或按输入类型分类预测 |
 | 2 | **无分布式房间分配** | 单进程单机。真实游戏服按 shard 部署 + 一致性哈希做房间路由 |
-| 3 | **单机单进程并发模型（v1.1 重构）** | 已补 worker 线程池 + 无锁 MPSC（网络事件）/SPSC（每连接发送环）+ 每连接背压，并经 ThreadSanitizer CI 验证无数据竞争。仍非「百万连接」级（无 epoll/io_uring、无分片路由） |
+| 3 | **单机单进程并发模型（v1.1 重构）** | 已补 worker 线程池 + 无锁 MPSC（网络事件）/SPSC（每连接发送环）+ 每连接背压，并由 ThreadSanitizer CI（tsan job）做无数据竞争验证。该 job 曾捕获并修复两处退出阶段问题：① 主线程 `close` ↔ worker `recvfrom`/`accept`/`recv` 的 fd 生命周期竞态（改为先 `join` 全部网络线程、再 `close` 任何 fd）；② 监听 socket 未设非阻塞导致 worker 阻塞在 `recvfrom`/`accept` 中、`join` 永久挂死（改为监听 socket 设非阻塞，worker 经 `select` 超时感知 `running=false` 退出）。仍非「百万连接」级（无 epoll/io_uring、无分片路由） |
 | 4 | **回滚上限 = 快照环深度** | 实测：环深64 帧时，delay ≤ 12 全部收敛；把环深降到 4 帧而 delay=3 时开始出现「快照不足分歧 1998 帧」。工业级做法是拒绝该输入并让客户端重连，本项目只记录分歧 |
 | 5 | **压测为单房间规模** | `loadtest` 测的是真实 socket 往返（4 玩家）；更大规模靠 `multi_room_test` 的进程内模拟，两者未叠加成「真实 socket × 千房间」 |
 | 6 | **无 Graceful 重连的状态恢复验证** | 协议层有 `kReconnect` 消息与 `on_reconnect` 接口，但未写端到端测试 |
@@ -693,8 +693,10 @@ synq/
 
 - 所有修改 room 状态的操作都经 MPSC 队列、由模拟线程**单线程**处理，
   确定性模拟不被并发破坏（与旧版 udp 线程直改 room 相比，彻底消除竞争）。
-- 无锁原语（`MpscQueue` / `SpmcRing`，acquire/release 严格配对）经
-  **ThreadSanitizer CI**（ci.yml `tsan` job，`-fsanitize=thread` 编译并短跑）验证无数据竞争。
+- 无锁原语（`MpscQueue` / `SpmcRing`，acquire/release 严格配对）由
+  **ThreadSanitizer CI**（ci.yml `tsan` job，`-fsanitize=thread` 编译并短跑）做无数据竞争验证。该 job 曾捕获并修复两处**退出阶段问题**：
+  1. **fd 生命周期竞态**：主线程在 `join` 网络线程之前就 `close` 了监听/连接 fd，而 worker 仍在 `recvfrom`/`accept`/`recv`——已通过「先 `join` 全部网络线程、再 `close` 任何 fd」的顺序修复。
+  2. **worker 阻塞挂死**：监听 socket 默认阻塞，worker 进入 `recvfrom`/`accept` 后无新数据则永久阻塞，`join` 永远等不到——已通过将**监听 socket 也设为非阻塞**修复，worker 始终回到带 10ms/500ms 超时的 `select` 来感知 `running=false` 并退出（不再依赖 `close()` 打断）。
 - 发送 socket 设为非阻塞：慢客户端只会触发背压（EAGAIN → 计数丢弃），绝不会让
   sender worker 卡在 `send` 上导致退出死锁（已用「客户端从不读」场景验证可优雅退出）。
 
