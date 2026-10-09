@@ -38,6 +38,7 @@ build histogram    histogram_test.cpp
 build configtest   config_test.cpp
 build loadtest     loadtest_main.cpp
 build reconnect     reconnect_test.cpp
+build rollback_bound rollback_bound_test.cpp
 
 if [[ "$1" == "verify" ]]; then
   echo ""

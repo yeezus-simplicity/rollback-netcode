@@ -127,6 +127,7 @@ struct NetStats {
   std::atomic<std::uint64_t> reconnects{0};   // 重连次数
   std::atomic<std::uint64_t> timeouts{0};          // 输入超时判定
   std::atomic<std::uint64_t> backpressure_drops{0};  // 发送队列满，背压丢弃的状态包
+  std::atomic<std::uint64_t> resyncs{0};             // #4：超界输入触发的重同步次数
 };
 
 // 游戏服：一个房间 = 一个 BattleRoom
@@ -159,9 +160,10 @@ class BattleRoom {
       net_stats_.drops.fetch_add(1, std::memory_order_relaxed);
       return;
     }
-    // 幂等：UDP 会重复投递，重复包直接丢弃
-    if (frame <= last_seen_frame_[player]) return;
-    last_seen_frame_[player] = frame;
+    // 真·去重：仅丢弃「该 (player,frame) 已收过」的 UDP 重传包；迟到但从未收到
+    // 的新包仍处理 —— 使其能触发回滚（窗口内）或重同步（超界，见 #4 修复）。
+    // 旧实现用 frame <= last_seen_frame 会把迟到新包误删，丢失可回滚输入。
+    if (session_.input_received(player, frame)) return;
     if (frame > last_input_frame_[player]) last_input_frame_[player] = frame;
     session_.on_input(player, frame, cmd);
   }
@@ -213,6 +215,10 @@ class BattleRoom {
   std::int32_t last_input_frame(int p) const { return last_input_frame_[p]; }
   void set_connected(int p, bool c) { sessions_[p].connected = c; }
 
+  // #4：超界输入重同步透传
+  bool needs_resync(int p) const { return session_.needs_resync(p); }
+  void clear_resync(int p) { session_.clear_resync(p); }
+
   // 生成广播包（增量 or 全量）
   // 【设计】非 const：内部要累加网络统计（atomic::fetch_add 不是 const 方法）。
   std::vector<std::uint8_t> build_state_packet(bool full) {
@@ -234,7 +240,6 @@ class BattleRoom {
   World prev_world_;
   PlayerSession sessions_[kMaxPlayers];
   std::int32_t last_input_frame_[kMaxPlayers] = {0, 0, 0, 0};
-  std::int32_t last_seen_frame_[kMaxPlayers] = {-1, -1, -1, -1};
   NetStats net_stats_;
 };
 

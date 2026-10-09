@@ -69,7 +69,7 @@
   最终以 CI 该 job 复验为准。
 - CI 防回归门禁 grep 对 `src/` 零命中（`loadtest_main.cpp` 中的命中行是注释，被注释排除规则跳过）。
 
-## 后续补充：断线重连端到端验证（消除已知限制 #6）
+## 后续补充（一）：断线重连端到端验证（消除已知限制 #6）
 
 - 新增 `src/reconnect_test.cpp`：走真实 socket，验证「Graceful 重连的状态恢复」——
   连接 gameserver → 断开 TCP → 重连并发送 `kReconnect` → 断言重连后客户端在至多 1 帧内
@@ -80,6 +80,33 @@
   `reconnect_test`，退出码非 0 即失败）。
 - 本地实测：3 次连跑均通过（断线帧 → 重连后首份更新全量快照，连续无缺口）。
 - 已知限制 #6 由「未做」翻转为「已验证」。
+
+## 后续补充（二）：TSan 第三次捕获 —— world 读写稳态竞态
+
+- CI `tsan` job 再次报 `data race`（**稳态，非退出阶段**）：accept worker 接入新连接时跨线程
+  调用 `room.build_state_packet()` 读 `session.world()`，与模拟线程 `room.tick()` 写 `world`
+  冲突（rollback.h 读 vs world.h 写）。
+- 修复（提交 `714cef0`）：accept worker 不再触碰 `room`，握手全量包改由**模拟线程（主线程，
+  独占 `world`）在接管新连接时**构造并下发——所有对 `world` 的读写都落在单线程内。
+- 本地验证 normal/slow/reconnect-e2e 三种模式均 RC=0 且无 data race；TSan 真机绿以 CI 复验为准。
+
+## 后续补充（三）：回滚上限修复（消除已知限制 #4）
+
+- 旧实现：输入延迟超过快照环深度（默认 64 帧）时，`try_rollback` 在 `snapshots` 覆盖不到时
+  `divergence++` 后**静默丢弃**，造成客户端永久分歧（不符工业级做法）。
+- 修复（本批）：
+  - `RollbackSession::on_input` 显式识别「延迟超过环深度」的超界输入 → 拒绝并置位
+    `needs_resync(player)`，由上层（服务端）补发权威全量快照重新对齐，把"静默分歧"变为
+    "有界、可恢复"的重同步。
+  - 网络层 UDP 去重由 `frame <= last_seen` 改为**真·去重**（`input_received` 按 `has[player]`
+    判定），避免把迟到但从未收到的新包误删——使窗口内回滚与超界重同步真正生效。
+  - 服务端 `server_main.cpp` 每帧检查 `needs_resync`：命中则向所有客户端补发全量快照，并计
+    `NetStats::resyncs`。
+- 新增 `src/rollback_bound_test.cpp`（`build.sh` 的 `rollback_bound` 目标）专项验证：
+  超界输入触发 `needs_resync` 且不产生静默分歧；窗口内迟到输入不被误拒、仍能触发回滚。
+- 本地实测：该测试 RC=0 通过；`rollback_test`（delay=8）正确性仍逐位一致、分歧 0 帧；
+  `determinism_test` 正常跑通（O2，2000 帧）。已知限制 #4 由「只记录分歧」翻转为「已修复」。
+
 
 ## 诚实保留（仍未做）
 

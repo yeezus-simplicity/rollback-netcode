@@ -528,6 +528,21 @@ int main(int argc, char** argv) {
     roll_hist[static_cast<std::size_t>(f)] = rolls;
     total_rolls += rolls;
 
+    // 3.5 #4 修复：若某玩家输入超界被拒，session 请求重同步 —— 立即向所有客户端
+    //     补发权威全量快照（重对齐），把"静默分歧"变成"有界、可恢复"的重同步。
+    bool resynced = false;
+    for (int p = 0; p < kMaxPlayers; ++p) {
+      if (room.needs_resync(p)) {
+        room.net_stats().resyncs.fetch_add(1, std::memory_order_relaxed);
+        room.clear_resync(p);
+        resynced = true;
+      }
+    }
+    if (resynced) {
+      auto snap = room.build_state_packet(true);
+      for (auto* c : conns) c->ring.try_push(snap);
+    }
+
     // 4. 广播状态（增量或全量），写入每连接发送环；满则背压丢弃
     auto pkt = room.build_state_packet(f % kTickRate == 0);
     for (auto it = conns.begin(); it != conns.end();) {
@@ -613,6 +628,8 @@ int main(int argc, char** argv) {
   std::printf("  解析丢弃   : %llu\n", (unsigned long long)ns.drops.load());
   std::printf("  背压丢弃   : %llu\n",
               (unsigned long long)ns.backpressure_drops.load());
+  std::printf("  超界重同步 : %llu\n",
+              (unsigned long long)ns.resyncs.load());
   std::printf("\n【回滚统计】\n");
   std::printf("  发生回滚帧数 : %lld / %d\n", static_cast<long long>(rolls_n),
               frames);

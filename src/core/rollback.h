@@ -104,7 +104,9 @@ struct FrameInputs {
 class RollbackSession {
  public:
   RollbackSession(std::uint64_t seed, std::size_t snapshot_capacity = 64)
-      : world_(make_world(seed)), snapshots_(snapshot_capacity) {
+      : world_(make_world(seed)),
+        snapshots_(snapshot_capacity),
+        max_rollback_depth_(snapshot_capacity > 1 ? snapshot_capacity - 1 : 0) {
     for (int i = 0; i < kMaxPlayers; ++i) last_cmd_[i] = Command{};
     frames_.push_back(FrameInputs{});  // frame 0 占位
     frames_[0].frame = 0;
@@ -114,6 +116,15 @@ class RollbackSession {
   // ---- 网络层回调：某玩家的某帧真实输入到达 ----
   void on_input(int player, std::int32_t frame, const Command& cmd) {
     if (frame < 0 || frame > world_.tick + max_prediction_ahead_) return;
+    // 【#4 修复】输入延迟超过快照环深度：回滚已无法纠正（SnapshotRing 覆盖不到），
+    // 旧实现会在 try_rollback 里 divergence++ 后静默丢弃，造成客户端永久分歧。
+    // 现改为：显式拒绝该超界输入并请求「重同步」，由上层（服务端）向客户端
+    // 补发权威全量快照重新对齐，把「静默分歧」变成「有界、可恢复」的重同步。
+    if (world_.tick - frame > static_cast<std::int32_t>(max_rollback_depth_)) {
+      resync_request_[player] = true;
+      ++resync_count_;
+      return;
+    }
     std::size_t i = static_cast<std::size_t>(frame - hist_base_);
     if (i >= frames_.size()) frames_.resize(i + 1);
     FrameInputs& fi = frames_[i];
@@ -188,6 +199,26 @@ class RollbackSession {
   std::size_t snapshot_bytes() const { return snapshots_.memory_bytes(); }
   // 端到端与本地推进的偏离帧数（正确性校验：回滚后应与无延迟模拟一致）
   std::int32_t divergence_frames() const { return divergence_frames_; }
+
+  // ---- #4：超界输入重同步请求 ----
+  // on_input 收到「延迟超过快照环深度」的输入时，置位该玩家的重同步请求。
+  // 上层（服务端）每帧检查并消费：向客户端补发权威全量快照、调用 clear_resync。
+  bool needs_resync(int player) const {
+    return player >= 0 && player < kMaxPlayers && resync_request_[player];
+  }
+  void clear_resync(int player) {
+    if (player >= 0 && player < kMaxPlayers) resync_request_[player] = false;
+  }
+  std::int64_t resync_count() const { return resync_count_; }
+
+  // 真·去重：该 (player, frame) 是否已收到过真实输入。
+  // 用于网络层替代「frame <= last_seen」（后者会把迟到但从未收到的新包误删，
+  // 既丢失可回滚的输入、又让超界包到不了上面的重同步逻辑）。
+  bool input_received(int player, std::int32_t frame) const {
+    if (player < 0 || player >= kMaxPlayers || frame < 0) return false;
+    std::size_t i = static_cast<std::size_t>(frame - hist_base_);
+    return i < frames_.size() && frames_[i].has[player];
+  }
 
  private:
   void ensure_frame(std::int32_t f) {
@@ -277,6 +308,11 @@ class RollbackSession {
   }
 
   static constexpr std::int32_t max_prediction_ahead_ = 2;
+
+  // 回滚窗口上界（= 快照环容量 - 1）。输入延迟超过此值无法回滚纠正。
+  std::size_t max_rollback_depth_;
+  bool resync_request_[kMaxPlayers] = {false, false, false, false};
+  std::int64_t resync_count_ = 0;
 
   World world_;
   SnapshotRing snapshots_;
