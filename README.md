@@ -806,6 +806,7 @@ synq/
 | **真实 socket 压测** | **4 客户端 UDP 输入 + TCP 状态广播，QPS / RTT 分位数 / 带宽，服务端背压·丢弃** | **CI**（`load-test` job，`loadtest_main.cpp`，真实 socket） |
 | **真实 socket × 多房间** | **单进程 32–64 房间 × 4 玩家（256–512 真实 socket），tick 预算占用 / 背压 / TCP 字节校验** | **CI**（`multiroom-net` job，`multiroom_net_test.cpp`） |
 | **性能不变量 + 吞吐** | **回滚重算帧数=延迟+1 / 回滚哈希==理想哈希 / 增量包≤全量包；单房间 μs/帧、多房间帧/s** | **CI**（`bench` job，`bench_main.cpp`） |
+| **编译告警门禁** | **全部源文件在 `-Wall -Wextra -Werror` 下零告警**（GCC 阻塞；Clang/cppcheck 参考） | **CI**（`warnings` job）+ 本地 `./build.sh warnings` |
 
 手动项需要两个终端：
 

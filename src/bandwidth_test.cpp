@@ -163,7 +163,7 @@ int main() {
   {
     Reader r{full.data(), full.size(), 0};
     r.get_u8();  // type
-    auto f = r.get_varint();
+    r.get_varint();  // frame（此处不校验帧号，仅消费字节）
     int max_hp_err = 0, max_pos_err = 0;
     for (int i = 0; i < kMaxPlayers; ++i) {
       auto x = r.get_pos();
@@ -174,7 +174,11 @@ int main() {
       // 位置用 1/1000 精度，允许 1 单位误差
       int xe = std::abs(x - w.players[i].x) / 65536;
       int ye = std::abs(y - w.players[i].y) / 65536;
+      // 【编译告警抓到的真实缺陷】原实现只把 xe 计入 max_pos_err，ye 算了却没用
+      // —— 位置误差其实只校验了 X 轴、漏了 Y 轴，而输出却写着「位置误差」。
+      // 加 -Wall -Wextra 后 -Wunused-variable 把它暴露出来，现补上 Y 轴。
       if (xe > max_pos_err) max_pos_err = xe;
+      if (ye > max_pos_err) max_pos_err = ye;
       if (std::abs(hp - w.players[i].hp) > max_hp_err)
         max_hp_err = std::abs(hp - w.players[i].hp);
     }

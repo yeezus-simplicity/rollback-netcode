@@ -86,7 +86,8 @@ class ReplayRecorder {
     put_varint(cur, player);
     put_command(cur, cmd);
     ++input_count_;
-    if (frame > frame_count_) frame_count_ = static_cast<std::uint32_t>(frame + 1);
+    const std::uint32_t next = static_cast<std::uint32_t>(frame) + 1u;
+    if (next > frame_count_) frame_count_ = next;
   }
 
   std::size_t bytes_in_memory() const {

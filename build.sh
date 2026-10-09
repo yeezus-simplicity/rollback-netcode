@@ -17,6 +17,32 @@ fi
 OUT="${TMPDIR:-/tmp}/synq_build"
 mkdir -p "$OUT"
 
+# ---------------------------------------------------------------------------
+# 编译告警门禁：./build.sh warnings
+# ---------------------------------------------------------------------------
+# 【为什么把门禁设成「零告警」而不是「减少告警」】
+#   告警只要允许存在，就会一直存在 —— 新告警混进既有告警里没人看。
+#   而 -Wall -Wextra 抓的往往不是风格问题：本项目清告警时就抓到一个真实缺陷
+#   （bandwidth_test 只校验了 X 轴位置误差、Y 轴算了没用 —— -Wunused-variable 暴露）。
+#   所以：**先清零，再上 -Werror，此后任何新告警即 CI 红。**
+if [[ "$1" == "warnings" ]]; then
+  echo "[warnings] -Wall -Wextra -Werror 全源文件检查..."
+  WFAIL=0
+  for f in src/*.cpp src/client/*.cpp; do
+    [[ -f "$f" ]] || continue
+    if ! g++ -std=c++20 -Wall -Wextra -Werror -fsyntax-only -Isrc "$f"; then
+      echo "  ✗ $f"
+      WFAIL=1
+    fi
+  done
+  if [[ "$WFAIL" == "1" ]]; then
+    echo "[warnings] ✗ 存在编译告警（-Werror 已生效），请修复后再提交"
+    exit 1
+  fi
+  echo "[warnings] ✓ 全部源文件在 -Wall -Wextra -Werror 下零告警"
+  exit 0
+fi
+
 build() {
   local name=$1 src=$2
   g++ $CXXFLAGS -Isrc "src/$src" -o "$OUT/$name" $OSFLAG

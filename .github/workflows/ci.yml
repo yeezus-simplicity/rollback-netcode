@@ -418,3 +418,60 @@ jobs:
             exit 1
           fi
           echo "✓ 性能基准通过：算法不变量全过（线性性/正确性/增量编码），吞吐高于下限"
+
+  warnings:
+    name: 编译告警门禁（-Wall -Wextra -Werror）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装编译环境
+        run: sudo apt-get update && sudo apt-get install -y g++ clang
+
+      # 【为什么门禁是「零告警」而不是「减少告警」】
+      #   告警只要允许存在就会一直存在 —— 新告警混进既有告警里，没人看。
+      #   而 -Wall -Wextra 抓的往往不是风格问题：本项目清告警时抓到一个真实缺陷
+      #   （bandwidth_test 的位置误差只校验了 X 轴，Y 轴算了却没用 —— 被
+      #    -Wunused-variable 暴露；输出却写着「位置误差」）。同时清掉了
+      #   RollbackSession 的 13 处 -Wreorder（初始化列表顺序与成员声明不一致）
+      #   和一个从未使用的私有成员 hist_。
+      #   故：先清零，再上 -Werror，此后任何新告警即 CI 红。
+      - name: GCC -Wall -Wextra -Werror（阻塞门禁）
+        run: |
+          set -e
+          FAIL=0
+          for f in src/*.cpp src/client/*.cpp; do
+            g++ -std=c++20 -Wall -Wextra -Werror -fsyntax-only -Isrc "$f" || FAIL=1
+          done
+          if [ "$FAIL" != "0" ]; then
+            echo "::error::GCC 下存在编译告警（-Werror 已生效）"
+            exit 1
+          fi
+          echo "✓ GCC：全部源文件在 -Wall -Wextra -Werror 下零告警"
+
+      # Clang 侧先作**参考**（不阻塞）：两个编译器的告警集并不相同 ——
+      # 例如 Clang 独有的 -Wunused-private-field 属于 -Wall，GCC 没有；
+      # 本地开发机未装 clang，无法在提交前把 Clang 独有告警预先清零。
+      # 等首轮 CI 输出把 Clang 侧也清零后，再把本步骤升级为阻塞（去掉
+      # continue-on-error 即可）。这是「先清零、再上 -Werror」同一原则的延伸：
+      # 不在没验证过的编译器上直接开阻塞门禁。
+      - name: Clang -Wall -Wextra（参考，非阻塞）
+        continue-on-error: true
+        run: |
+          FAIL=0
+          for f in src/*.cpp src/client/*.cpp; do
+            clang++ -std=c++20 -Wall -Wextra -fsyntax-only -Isrc "$f" || FAIL=1
+          done
+          if [ "$FAIL" != "0" ]; then
+            echo "::warning::Clang 下有告警（当前为参考项，未阻塞）—— 清零后应升级为阻塞"
+          else
+            echo "✓ Clang：全部源文件零告警"
+          fi
+
+      # cppcheck 同样只作参考：静态分析器版本之间结论差异大，
+      # 直接设成阻塞门禁会变成噪声源（与 bench 一节的取舍一致）。
+      - name: cppcheck（参考，非阻塞）
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y cppcheck
+          cppcheck --enable=warning,performance --std=c++20 --quiet --inline-suppr -Isrc src 2>&1 | head -60 || true
+          echo "（cppcheck 仅作参考输出，不作为门禁）"

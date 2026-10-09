@@ -168,6 +168,31 @@
 - 定位：不变量层捕捉**算法回归**（回滚范围/正确性/编码退化），吞吐层只求捕捉**灾难性回归**，
   真实数字进日志看趋势 —— 这是「宁可漏报轻微退化，也不让门禁变成噪声」的取舍。
 
+## 后续补充（七）：编译告警门禁（-Wall -Wextra -Werror）
+
+- 首次开启 `-Wall -Wextra` 全量扫描，共 **53 条告警**分布在 15 个文件；已全部清零：
+  - **`-Wreorder` × 13**（每个 TU 一次）：`RollbackSession` 的初始化列表顺序与成员
+    声明顺序不一致（`max_rollback_depth_` 声明在 `world_/snapshots_` 之前）。
+    这类告警的危险在于**初始化列表的书写顺序会被忽略、实际按声明顺序执行** ——
+    一旦成员之间真有依赖，就会静默按错误顺序初始化。已把初始化列表改为声明顺序。
+  - **`-Wunused-parameter` × 7**：`BattleRoom::on_reconnect` 的 `last_acked` 参数
+    （#6 之后快照下发已移到 accept 阶段，此参数确实不再使用）→ 改为匿名参数。
+  - **`-Wunused-variable` × 6**，其中一条是**真实缺陷**：
+    `bandwidth_test.cpp` 的位置误差校验只把 `xe` 计入 `max_pos_err`，`ye` 算了却没用
+    —— 即**只校验了 X 轴、漏了 Y 轴**，而输出却写着「位置误差」。编译器把它暴露出来，
+    现已补上 Y 轴（这正是「告警不是风格问题」的例证）。
+  - 另清掉 `latency_histogram.h` 未使用的 `lo`、`delta_snapshot_test.cpp` 未使用的
+    `per_room_kb`、`replay.h` 一处 `-Wsign-compare`（int32 与 uint32 比较）。
+  - 顺带删掉 `RollbackSession` 从未使用的私有成员 `hist_`（Clang 的 `-Wall` 含
+    `-Wunused-private-field`，会直接 `-Werror` 失败）。
+- `build.sh` 新增 `./build.sh warnings` 模式（本地一键复现门禁）；
+  CI 新增 `warnings` job：**GCC `-Wall -Wextra -Werror` 阻塞**，
+  Clang 与 cppcheck 先作**参考**（非阻塞）。
+- 关于 Clang 为何暂不阻塞（诚实说明）：两个编译器的告警集不同，Clang 有 GCC 没有的
+  检查（如 `-Wunused-private-field`），而本地开发机未装 clang，**无法在提交前预先清零
+  Clang 独有告警**。按本项目「先清零、再上 -Werror」的原则，不在未验证过的编译器上
+  直接开阻塞门禁；待首轮 CI 输出把 Clang 侧清零后，去掉 `continue-on-error` 即可升级。
+
 ## 诚实保留（仍未做）
 
 - **未证明「百万连接」级**：无 epoll/io_uring、无分片路由，仍是单机单进程。

@@ -169,7 +169,6 @@ class LatencyHistogram {
     for (int i = 0; i < kBuckets; ++i) {
       const std::uint64_t c = counts_[i].load(std::memory_order_relaxed);
       if (c == 0) continue;
-      const std::uint64_t lo = bucket_lower_bound(i);
       const std::uint64_t hi = bucket_upper_bound(i);
       std::snprintf(buf, sizeof(buf), "%s_bucket{le=\"%llu\"} %llu\n",
                     name.c_str(), (unsigned long long)hi,

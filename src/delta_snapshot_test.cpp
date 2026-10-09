@@ -123,7 +123,6 @@ int main(int argc, char** argv) {
   std::printf("  (对比：完整帧 %zu 字节/帧)\n", sizeof(World));
 
   // 内存承载外推
-  double per_room_kb = comp / 1024.0;
   std::printf("\n  1 万人在线 (2500 房间) 快照内存:\n");
   std::printf("    完整快照: %.1f MB\n", raw * 2500 / 1024.0 / 1024.0);
   std::printf("    增量快照: %.1f MB  (节省 %.1f MB)\n",

@@ -104,9 +104,9 @@ struct FrameInputs {
 class RollbackSession {
  public:
   RollbackSession(std::uint64_t seed, std::size_t snapshot_capacity = 64)
-      : world_(make_world(seed)),
-        snapshots_(snapshot_capacity),
-        max_rollback_depth_(snapshot_capacity > 1 ? snapshot_capacity - 1 : 0) {
+      : max_rollback_depth_(snapshot_capacity > 1 ? snapshot_capacity - 1 : 0),
+        world_(make_world(seed)),
+        snapshots_(snapshot_capacity) {
     for (int i = 0; i < kMaxPlayers; ++i) last_cmd_[i] = Command{};
     frames_.push_back(FrameInputs{});  // frame 0 占位
     frames_[0].frame = 0;
@@ -317,7 +317,6 @@ class RollbackSession {
   World world_;
   SnapshotRing snapshots_;
   std::vector<FrameInputs> frames_;
-  std::deque<FrameInputs> hist_;  // 保留类型，实际用 frames_
   std::int32_t hist_base_ = 0;
   Command last_cmd_[kMaxPlayers];
   std::int64_t total_rollbacks_ = 0;
