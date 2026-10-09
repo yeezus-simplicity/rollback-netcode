@@ -336,3 +336,45 @@ jobs:
             exit 1
           fi
           echo "✓ 真实 socket 压测通过：4 玩家 UDP 输入 + TCP 状态广播，QPS≈120，端到端 RTT p99<2ms(loopback)，服务端背压/解析丢弃=0"
+
+  multiroom-net:
+    name: 真实 socket × 多房间压测（补 #5 的多房间缺口）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装编译环境
+        run: sudo apt-get update && sudo apt-get install -y g++
+
+      # 【为什么需要这个 job】
+      #   multi_room_test 只测「进程内多房间模拟」（一个字节都不走 socket）；
+      #   load-test 只测「单房间真实 socket」（受 BattleRoom 的 kMaxPlayers=4 限制）。
+      #   中间那一格 —— **单进程多房间 × 真实 socket** —— 一直没有覆盖，
+      #   而这正是已知限制 #5 的缺口。
+      #
+      #   本 job 在单进程内起 32 个房间，每房间 4 个真实客户端 socket
+      #   （UDP 发输入 + TCP 收状态），全部走 loopback 协议栈，由同一个模拟线程
+      #   按 30Hz 推进。程序自带判定并输出 MULTIROOM_OK / MULTIROOM_FAIL：
+      #     端口全绑上 + 每房间都收到状态且推进到位 + 零背压 + TCP 字节数发出≈收到(<2%)
+      #   退出码非 0 → CI 红。
+      - name: 编译并运行多房间真实 socket 压测
+        run: |
+          set -e
+          g++ -O2 -std=c++20 -pthread -Isrc src/multiroom_net_test.cpp -o /tmp/mrn
+          RC=0
+          /tmp/mrn 32 10 4 > /tmp/mrn.log 2>&1 || RC=$?
+          cat /tmp/mrn.log
+          if [ "$RC" != "0" ]; then
+            echo "::error::多房间真实 socket 压测失败（rc=${RC}）"
+            exit 1
+          fi
+          # 防「静默空跑」：必须真的拿到 MULTIROOM_OK 且房间数达标
+          if ! grep -q "MULTIROOM_OK rooms=32" /tmp/mrn.log; then
+            echo "::error::未拿到 MULTIROOM_OK（疑似空跑或部分房间失败）"
+            exit 1
+          fi
+          # 防「静默失效」：TCP 字节校验行必须在（发出≈收到 才能证明链路真的通了）
+          if ! grep -qE "状态字节 发出/收到.*差 0\.[0-9]+%" /tmp/mrn.log; then
+            echo "::error::TCP 字节校验行缺失或异常（防静默失效）"
+            exit 1
+          fi
+          echo "✓ 多房间真实 socket 压测通过：32 房间 × 4 玩家（256 个客户端 socket），零背压，TCP 字节数零差异"

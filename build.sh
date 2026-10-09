@@ -39,6 +39,7 @@ build configtest   config_test.cpp
 build loadtest     loadtest_main.cpp
 build reconnect     reconnect_test.cpp
 build rollback_bound rollback_bound_test.cpp
+build multiroomnet  multiroom_net_test.cpp
 
 if [[ "$1" == "verify" ]]; then
   echo ""
@@ -99,6 +100,10 @@ if [[ "$1" == "verify" ]]; then
   echo "===== 10. 导出 Web 可视化数据 ====="
   "$OUT/exporttrace" 600 > web/trace.json
   echo "  已生成 web/trace.json ($(wc -c < web/trace.json) 字节)"
+
+  echo ""
+  echo "===== 11. 真实 socket × 多房间（消除 #5 缺口）====="
+  "$OUT/multiroomnet" 32 10 4 | grep -E "正常房间|实际 tick|输入包\(服务端|状态包\(服务端|状态字节|单 tick|MULTIROOM"
 fi
 
 if [[ "$1" == "server" ]]; then
