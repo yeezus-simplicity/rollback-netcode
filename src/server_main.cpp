@@ -412,11 +412,8 @@ int main(int argc, char** argv) {
 
       ConnOut* c = new ConnOut();
       c->fd = cfd;
-      // 握手：立即下发全量状态（写入发送环，由 sender 发送）
-      auto full = room.build_state_packet(true);
-      c->ring.try_push(std::move(full));
       senders.assign(c);
-      conn_q.enqueue(c);  // 通知主线程接管广播
+      conn_q.enqueue(c);  // 通知主线程接管广播（握手全量包由主线程构造，避免跨线程读 world）
 
       std::printf("[TCP] 客户端接入 (fd=%d)\n", cfd);
       std::fflush(stdout);
@@ -493,11 +490,15 @@ int main(int argc, char** argv) {
   for (int f = 0; f < frames; ++f) {
     next_tick += tick_interval;
 
-    // 0. 接管新接入的连接
+    // 0. 接管新接入的连接（主线程=模拟线程，独占 room.world()，在此构造握手包安全）
     ConnOut* nc;
     while (conn_q.dequeue(nc)) {
       all_conns.push_back(nc);
       conns.push_back(nc);
+      // 握手：主线程读取当前 world 构造全量状态包并立即下发，不再由 accept
+      // worker 跨线程读 world（消除 main 写 world vs accept 读 world 的 data race）
+      auto full = room.build_state_packet(true);
+      nc->ring.try_push(std::move(full));
     }
 
     // 1. 客户端产生并发送本帧输入

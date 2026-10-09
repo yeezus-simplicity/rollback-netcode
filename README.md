@@ -694,9 +694,10 @@ synq/
 - 所有修改 room 状态的操作都经 MPSC 队列、由模拟线程**单线程**处理，
   确定性模拟不被并发破坏（与旧版 udp 线程直改 room 相比，彻底消除竞争）。
 - 无锁原语（`MpscQueue` / `SpmcRing`，acquire/release 严格配对）由
-  **ThreadSanitizer CI**（ci.yml `tsan` job，`-fsanitize=thread` 编译并短跑）做无数据竞争验证。该 job 曾捕获并修复两处**退出阶段问题**：
-  1. **fd 生命周期竞态**：主线程在 `join` 网络线程之前就 `close` 了监听/连接 fd，而 worker 仍在 `recvfrom`/`accept`/`recv`——已通过「先 `join` 全部网络线程、再 `close` 任何 fd」的顺序修复。
-  2. **worker 阻塞挂死**：监听 socket 默认阻塞，worker 进入 `recvfrom`/`accept` 后无新数据则永久阻塞，`join` 永远等不到——已通过将**监听 socket 也设为非阻塞**修复，worker 始终回到带 10ms/500ms 超时的 `select` 来感知 `running=false` 并退出（不再依赖 `close()` 打断）。
+  **ThreadSanitizer CI**（ci.yml `tsan` job，`-fsanitize=thread` 编译并短跑）做无数据竞争验证。该 job 在迭代中**累计捕获并修复三处数据竞争**：
+  1. **fd 生命周期竞态（退出阶段）**：主线程在 `join` 网络线程之前就 `close` 了监听/连接 fd，而 worker 仍在 `recvfrom`/`accept`/`recv`——已通过「先 `join` 全部网络线程、再 `close` 任何 fd」的顺序修复。
+  2. **worker 阻塞挂死（退出阶段）**：监听 socket 默认阻塞，worker 进入 `recvfrom`/`accept` 后无新数据则永久阻塞，`join` 永远等不到——已通过将**监听 socket 也设为非阻塞**修复，worker 始终回到带 10ms/500ms 超时的 `select` 来感知 `running=false` 并退出（不再依赖 `close()` 打断）。
+  3. **world 读写竞态（稳态，非退出阶段）**：accept worker 在接入新连接时跨线程调用 `room.build_state_packet()` 读取 `session.world()`，与模拟线程 `room.tick()` 写入 `world` 形成竞争（TSan 报告：`RollbackSession::tick() const` 读 world @rollback.h vs `step()` 写 world @world.h，线程为 accept/sender worker）。已修复：accept worker **不再触碰 room**，握手全量包改由**模拟线程（主线程，独占 world）在接管新连接时**构造——确保所有对 `world` 的读写都落在单线程内，根源上消除该竞争。
 - 发送 socket 设为非阻塞：慢客户端只会触发背压（EAGAIN → 计数丢弃），绝不会让
   sender worker 卡在 `send` 上导致退出死锁（已用「客户端从不读」场景验证可优雅退出）。
 
