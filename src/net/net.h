@@ -125,7 +125,8 @@ struct NetStats {
   std::atomic<std::uint64_t> state_bytes{0};
   std::atomic<std::uint64_t> drops{0};        // 队列满/解析失败丢弃
   std::atomic<std::uint64_t> reconnects{0};   // 重连次数
-  std::atomic<std::uint64_t> timeouts{0};     // 输入超时判定
+  std::atomic<std::uint64_t> timeouts{0};          // 输入超时判定
+  std::atomic<std::uint64_t> backpressure_drops{0};  // 发送队列满，背压丢弃的状态包
 };
 
 // 游戏服：一个房间 = 一个 BattleRoom

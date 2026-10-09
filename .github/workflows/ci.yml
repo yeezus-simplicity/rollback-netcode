@@ -210,3 +210,38 @@ jobs:
             exit 1
           fi
           echo "✓ GCC 与 Clang 结果一致"
+
+  tsan:
+    name: ThreadSanitizer 并发无数据竞争验证
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装编译环境
+        run: sudo apt-get update && sudo apt-get install -y g++
+
+      # 【并发模型 v1.1 的硬验证】
+      # 仅「能编译、能跑」不足以证明无数据竞争——必须用 ThreadSanitizer 在真实
+      # 多线程执行下插桩检测。本 job 用 -fsanitize=thread 编译 gameserver（含
+      # MpscQueue / SpmcRing 两套无锁原语、worker 线程池、每连接背压），并以
+      # slow_tcp=1 跑一局，迫使「慢客户端 → 背压/EAGAIN」分支也被覆盖。
+      #
+      # 判定：TSan 一旦检出 data race，进程以非 0 退出并打印
+      # "WARNING: ThreadSanitizer: data race"。这里显式 grep 该串，命中即失败。
+      - name: ThreadSanitizer 编译 + 短跑
+        run: |
+          set -e
+          g++ -O1 -g -std=c++20 -fsanitize=thread -pthread -Isrc \
+              src/server_main.cpp -o /tmp/gs_tsan
+          echo "  [tsan] 编译完成，开始短跑（slow_tcp=1，覆盖背压分支）"
+          export TSAN_OPTIONS="halt_on_error=1"
+          OUT=$(timeout 120 /tmp/gs_tsan 4 60 15 1 300 1 2>&1) || RC=$?
+          echo "$OUT"
+          if echo "$OUT" | grep -q "data race"; then
+            echo "::error::ThreadSanitizer 检测到数据竞争（见上方报告）"
+            exit 1
+          fi
+          if [ "${RC:-0}" != "0" ]; then
+            echo "::error::gameserver 异常退出（rc=${RC}）"
+            exit 1
+          fi
+          echo "✓ ThreadSanitizer 未报告数据竞争，并发模型通过验证"

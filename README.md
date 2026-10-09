@@ -6,6 +6,8 @@
 
 代码内`namespace synq`；仓库名用`rollback-netcode` 以便被搜到。
 
+**在线可视化演示**：https://rollback-netcode-demo.app.workbuddy.host/ —— 600 帧回滚对局回放，纯前端可交互，无需本地编译。
+
 ---
 
 ## 0. 30 秒看懂这个项目
@@ -533,6 +535,7 @@ g++ $CXXFLAGS -Isrc src/export_trace.cpp -o export_trace $OSFLAG
 ./export_trace 600 > web/trace.json
 cd web && python -m http.server 8899
 # 浏览器打开 http://localhost:8899
+# 在线托管版（无需本地编译）：https://rollback-netcode-demo.app.workbuddy.host/
 
 # 9. 完整游戏服务器
 g++ $CXXFLAGS -Isrc src/server_main.cpp -o gameserver $OSFLAG
@@ -665,7 +668,7 @@ synq/
 |---|---|---|
 | 1 | **预测策略较简单** | 仅「历史同相位 + 重复上次」。工业级会用玩家行为模型，或按输入类型分类预测 |
 | 2 | **无分布式房间分配** | 单进程单机。真实游戏服按 shard 部署 + 一致性哈希做房间路由 |
-| 3 | **并发模型是固定 3 线程** | main tick / tcp accept / udp recv各一。**无线程池、无无锁队列、无背压** —— 这是投基础架构岗的最大短板 |
+| 3 | **单机单进程并发模型（v1.1 重构）** | 已补 worker 线程池 + 无锁 MPSC（网络事件）/SPSC（每连接发送环）+ 每连接背压，并经 ThreadSanitizer CI 验证无数据竞争。仍非「百万连接」级（无 epoll/io_uring、无分片路由） |
 | 4 | **回滚上限 = 快照环深度** | 实测：环深64 帧时，delay ≤ 12 全部收敛；把环深降到 4 帧而 delay=3 时开始出现「快照不足分歧 1998 帧」。工业级做法是拒绝该输入并让客户端重连，本项目只记录分歧 |
 | 5 | **压测为单房间规模** | `loadtest` 测的是真实 socket 往返（4 玩家）；更大规模靠 `multi_room_test` 的进程内模拟，两者未叠加成「真实 socket × 千房间」 |
 | 6 | **无 Graceful 重连的状态恢复验证** | 协议层有 `kReconnect` 消息与 `on_reconnect` 接口，但未写端到端测试 |
@@ -673,20 +676,32 @@ synq/
 
 ### 关于第 3 条的具体说明
 
-服务端当前结构：
+**v1.1 重构（对应 CI 的 tsan job）** —— 原来「main / tcp / udp 各一线程、udp 线程直改 room」
+存在数据竞争隐患，且无线程池、无背压。现已改为：
 
 ```
-main thread : 30Hz tick 循环（模拟推进 + 状态广播）
-tcp thread  : accept + 每连接发送
-udp thread  : 阻塞 recvfrom
+网络 I/O 与确定性模拟解耦：
+  UDP recv worker 池 (kUdpRecvWorkers)
+        │  入队（无锁 MpscQueue）── 网络事件(INPUT/ACK/RECONNECT)
+  TCP accept worker
+        ├─ 每连接专属 recv 线程 ───────┘（同一 MpscQueue，多生产者单消费者）
+        └─ 分配 sender worker + 建 SPSC 发送环（无锁 SpmcRing）
+  sender worker 池 (kSenderWorkers)  drain 各连接 SPSC 环 → send
+  模拟线程 (main 30Hz tick)  drain MpscQueue → room.tick() → 广播包写入各 SPSC 环
+        发送环满 → 背压丢弃并计数（慢客户端不阻塞快客户端/tick）
 ```
 
-`NetStats` 用 `std::atomic` 做无锁计数，统计热路径 **10.4ns/次**
-（见直方图测试），但**这只证明「无锁原子够快」，不证明「架构适合百万连接」**。
+- 所有修改 room 状态的操作都经 MPSC 队列、由模拟线程**单线程**处理，
+  确定性模拟不被并发破坏（与旧版 udp 线程直改 room 相比，彻底消除竞争）。
+- 无锁原语（`MpscQueue` / `SpmcRing`，acquire/release 严格配对）经
+  **ThreadSanitizer CI**（ci.yml `tsan` job，`-fsanitize=thread` 编译并短跑）验证无数据竞争。
+- 发送 socket 设为非阻塞：慢客户端只会触发背压（EAGAIN → 计数丢弃），绝不会让
+  sender worker 卡在 `send` 上导致退出死锁（已用「客户端从不读」场景验证可优雅退出）。
 
-要补的是：worker线程池 + 无锁 MPSC 队列（单生产者多消费者）+ 每个连接的
-背压策略（慢客户端的发送缓冲上限）。这也是为什么本项目更适合投
-**游戏服务端 / 通用后端**，而不是**基础架构**岗。
+`NetStats` 仍用 `std::atomic` 做无锁计数（统计热路径 **10.4ns/次**，见直方图测试）。
+诚实保留：**尚未证明「百万连接」级**——没有 epoll/io_uring、没有分片路由，
+仍是单机单进程。所以更适合投 **游戏服务端 / 通用后端** 岗；若投**基础架构**岗，
+这一条仍需补 I/O 多路复用与水平扩展。
 
 ---
 
@@ -702,6 +717,7 @@ udp thread  : 阻塞 recvfrom
 | 带宽| 文本协议 vs 二进制协议，1 万人外推 | 自动 |
 | 回放 | CRC 校验 + 篡改拒绝加载 | 自动 |
 | 多房间并发 | 128 房间，16 逻辑核吞吐 | 自动 |
+| 并发无数据竞争 | ThreadSanitizer 编译 + 短跑（worker 池 / 无锁 MPSC·SPSC / 背压） | 自动（tsan job） |
 | 延迟分位数 | p50/p90/p99/p99.9 + Prometheus 导出格式 | 自动 |
 | 优雅退出 | 信号置位 + 超时等待 + 后台唤醒 | 自动 |
 | 配置 | 文件/环境变量/命令行三级优先级 + 非法值降级 | 自动 |
