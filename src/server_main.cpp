@@ -515,8 +515,8 @@ int main(int argc, char** argv) {
           room.on_ack(ev.player, ev.frame);
           break;
         case NetEvent::RECONNECT: {
-          World w = room.world();
-          room.on_reconnect(ev.player, ev.frame, w);
+          // 仅恢复会话状态；全量快照已在 accept 新连接时立即下发
+          room.on_reconnect(ev.player, ev.frame);
           break;
         }
       }

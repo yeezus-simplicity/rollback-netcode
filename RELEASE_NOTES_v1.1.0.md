@@ -69,11 +69,22 @@
   最终以 CI 该 job 复验为准。
 - CI 防回归门禁 grep 对 `src/` 零命中（`loadtest_main.cpp` 中的命中行是注释，被注释排除规则跳过）。
 
+## 后续补充：断线重连端到端验证（消除已知限制 #6）
+
+- 新增 `src/reconnect_test.cpp`：走真实 socket，验证「Graceful 重连的状态恢复」——
+  连接 gameserver → 断开 TCP → 重连并发送 `kReconnect` → 断言重连后客户端在至多 1 帧内
+  拿到「比断线时更新」的全量快照，且能连续收到更新快照（已重新同步到权威世界）。
+- 服务端 `on_reconnect` 清理：移除被丢弃的 `World out_world` 死参数，仅负责恢复会话状态；
+  恢复用的全量快照仍由 accept 新连接时立即下发（见 `server_main.cpp`）。
+- `build.sh` 新增 `reconnect` 目标；CI 新增 `reconnect-e2e` job（启动 gameserver 后运行
+  `reconnect_test`，退出码非 0 即失败）。
+- 本地实测：3 次连跑均通过（断线帧 → 重连后首份更新全量快照，连续无缺口）。
+- 已知限制 #6 由「未做」翻转为「已验证」。
+
 ## 诚实保留（仍未做）
 
 - **未证明「百万连接」级**：无 epoll/io_uring、无分片路由，仍是单机单进程。
 - 客户端为 bot（有预测器与 `web/` 可视化），无真实渲染引擎接入。
-- 无 Graceful 重连的端到端测试（协议层 `kReconnect` 已存在）。
 
 ## 构建 / 运行
 

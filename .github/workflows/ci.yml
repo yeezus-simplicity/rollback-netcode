@@ -101,6 +101,7 @@ jobs:
           g++ -O2 -std=c++20 -pthread -Isrc src/histogram_test.cpp    -o /tmp/hist
           g++ -O2 -std=c++20 -pthread -Isrc src/config_test.cpp       -o /tmp/cfg
           g++ -O2 -std=c++20 -pthread -Isrc src/loadtest_main.cpp     -o /tmp/lt
+          g++ -O2 -std=c++20 -pthread -Isrc src/reconnect_test.cpp    -o /tmp/rec
 
       # 【踩坑·编译覆盖盲区】
       # 最初 CI 只编译 9 个程序，漏掉了 4 个：
@@ -245,3 +246,43 @@ jobs:
             exit 1
           fi
           echo "✓ ThreadSanitizer 未报告数据竞争，并发模型通过验证"
+
+  reconnect-e2e:
+    name: 断线重连端到端验证
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装编译环境
+        run: sudo apt-get update && sudo apt-get install -y g++
+
+      # 【消除已知限制 #6：Graceful 重连的状态恢复验证】
+      # reconnect_test.cpp 走真实 socket：连接 gameserver → 断开 TCP → 重连并发送
+      # kReconnect → 断言重连后客户端在 1 帧内拿到「比断线时更新」的全量快照，
+      # 且能连续收到更新快照（已重新同步到权威世界）。
+      # 判定：reconnect_test 退出码 0 = 通过，非 0 = 失败。
+      - name: 编译 gameserver + reconnect_test
+        run: |
+          g++ -O2 -std=c++20 -pthread -Isrc src/server_main.cpp -o /tmp/gs
+          g++ -O2 -std=c++20 -pthread -Isrc src/reconnect_test.cpp -o /tmp/rec
+
+      - name: 启动 gameserver（后台）并运行重连端到端测试
+        run: |
+          set -e
+          # 1 玩家、零延迟/抖动/丢包（确定性），600 帧 = 20s 足够测试窗口
+          /tmp/gs 1 0 0 0 600 > /tmp/gs.log 2>&1 &
+          GSPID=$!
+          # 给服务端一点启动时间
+          sleep 2
+          RC=0
+          # 用 || RC=$? 捕获退出码（set -e 下不会因测试非零退出而跳过收尾）
+          /tmp/rec 127.0.0.1 || RC=$?
+          # 不论测试通过与否，都先结束服务端
+          kill $GSPID 2>/dev/null || true
+          wait $GSPID 2>/dev/null || true
+          if [ "$RC" != "0" ]; then
+            echo "::error::断线重连端到端验证失败（rc=${RC}）"
+            echo "----- gameserver 日志尾部 -----"
+            tail -20 /tmp/gs.log
+            exit 1
+          fi
+          echo "✓ 断线重连端到端验证通过：客户端重连后重新同步到权威世界"

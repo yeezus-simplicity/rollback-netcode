@@ -174,15 +174,16 @@ class BattleRoom {
     }
   }
 
-  // 断线重连：下发全量快照，客户端跳到该帧
-  bool on_reconnect(int player, std::int32_t last_acked, World& out_world) {
+  // 断线重连：仅恢复会话状态（置 connected、计 reconnects）。
+  // 【注意】恢复用的全量快照并不在此下发——服务端在 accept 新连接时
+  // 已立即下发一份全量快照（见 server_main.cpp），因此重连客户端会在
+  // 至多 1 帧内拿到最新权威状态；本方法只负责把会话重新标记为在线。
+  bool on_reconnect(int player, std::int32_t last_acked) {
     if (player < 0 || player >= kMaxPlayers) return false;
     sessions_[player].connected = true;
     sessions_[player].reconnect_count++;
     sessions_[player].disconnect_tick = -1;
     net_stats_.reconnects.fetch_add(1, std::memory_order_relaxed);
-    // 从快照环取「client 已确认的帧」对应的状态（若已滚出则取最近可用）
-    out_world = session_.world();
     return true;
   }
 

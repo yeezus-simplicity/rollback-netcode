@@ -671,7 +671,7 @@ synq/
 | 3 | **单机单进程并发模型（v1.1 重构）** | 已补 worker 线程池 + 无锁 MPSC（网络事件）/SPSC（每连接发送环）+ 每连接背压，并由 ThreadSanitizer CI（tsan job）做无数据竞争验证。该 job 曾捕获并修复两处退出阶段问题：① 主线程 `close` ↔ worker `recvfrom`/`accept`/`recv` 的 fd 生命周期竞态（改为先 `join` 全部网络线程、再 `close` 任何 fd）；② 监听 socket 未设非阻塞导致 worker 阻塞在 `recvfrom`/`accept` 中、`join` 永久挂死（改为监听 socket 设非阻塞，worker 经 `select` 超时感知 `running=false` 退出）。仍非「百万连接」级（无 epoll/io_uring、无分片路由） |
 | 4 | **回滚上限 = 快照环深度** | 实测：环深64 帧时，delay ≤ 12 全部收敛；把环深降到 4 帧而 delay=3 时开始出现「快照不足分歧 1998 帧」。工业级做法是拒绝该输入并让客户端重连，本项目只记录分歧 |
 | 5 | **压测为单房间规模** | `loadtest` 测的是真实 socket 往返（4 玩家）；更大规模靠 `multi_room_test` 的进程内模拟，两者未叠加成「真实 socket × 千房间」 |
-| 6 | **无 Graceful 重连的状态恢复验证** | 协议层有 `kReconnect` 消息与 `on_reconnect` 接口，但未写端到端测试 |
+| 6 | **Graceful 重连的状态恢复**（v1.1 验证） | 协议层 `kReconnect` 消息 + `on_reconnect` 接口已存在，并由 `reconnect_test.cpp` 端到端验证：断线→重连→客户端在 1 帧内拿到更新的全量快照并连续追踪权威世界（见验证矩阵 `reconnect-e2e` job） |
 | 7 | **客户端为 bot** | 有预测器与可视化（`web/`），但无渲染引擎接入、无真实输入采集 |
 
 ### 关于第 3 条的具体说明
@@ -719,6 +719,7 @@ synq/
 | 带宽| 文本协议 vs 二进制协议，1 万人外推 | 自动 |
 | 回放 | CRC 校验 + 篡改拒绝加载 | 自动 |
 | 多房间并发 | 128 房间，16 逻辑核吞吐 | 自动 |
+| 断线重连状态恢复 | 断线→重连→重新同步权威世界 | `reconnect-e2e` job（`reconnect_test.cpp`，真实 socket） |
 | 并发无数据竞争 | ThreadSanitizer 编译 + 短跑（worker 池 / 无锁 MPSC·SPSC / 背压） | 自动（tsan job） |
 | 延迟分位数 | p50/p90/p99/p99.9 + Prometheus 导出格式 | 自动 |
 | 优雅退出 | 信号置位 + 超时等待 + 后台唤醒 | 自动 |
