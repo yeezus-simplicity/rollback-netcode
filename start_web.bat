@@ -1,7 +1,7 @@
 @echo off
 REM ============================================================
 REM  synq 一键启动 Web 可视化
-REM  双击本文件即可：自动编译 -> 生成数据 -> 启动服务器 -> 开浏览器
+REM  双击本文件即可：自动编译 -> 生成轨迹 -> 起静态服务器 -> 打开浏览器
 REM ============================================================
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
@@ -12,7 +12,7 @@ echo   synq 帧同步回滚可视化
 echo ============================================================
 echo.
 
-REM ---- 1. 检测编译器 ----
+REM ---- 1. 检查编译器 ----
 where g++ >nul 2>&1
 if errorlevel 1 (
     echo [错误] 未找到 g++ 编译器
@@ -43,68 +43,105 @@ if not exist "web" mkdir web
 build\export_trace.exe 600 > web\trace.json
 for %%A in (web\trace.json) do echo       完成 (%%~zA 字节)
 
-REM ---- 3.5 清理旧进程 ----
-REM 上次启动的服务器可能还占着 8899，导致本次启动失败（浏览器拒绝连接）。
-REM 先结束占用该端口的进程，再启动新的。
+REM ---- 3.5 清理占用 8899 的旧进程 ----
 for /f "tokens=5" %%P in ('netstat -ano ^| findstr :8899 ^| findstr LISTENING') do (
-    echo       清理旧服务器 PID=%%P
+    echo       结束旧服务器 PID=%%P
     taskkill /PID %%P /F >nul 2>&1
 )
 ping -n 2 127.0.0.1 >nul
 
-REM ---- 4. 启动服务器 ----
-REM Python 缺失兜底：尝试 py（Windows Python Launcher），都没有就用内置 node
+REM ---- 4. 选择可用的静态服务器 ----
+REM  【关键】PATH 里的 %LOCALAPPDATA%\Microsoft\WindowsApps\python.exe 是微软商店的
+REM  「应用执行别名」假存根，它不运行 Python、只会弹商店。where python 会优先命中它，
+REM  所以这里优先用 py launcher；回退时显式跳过 WindowsApps 路径，
+REM  并且要求解释器"真能执行 import sys"才采用。
 set SERVER_CMD=
-where python >nul 2>&1 && set SERVER_CMD=python
-if not defined SERVER_CMD (
-    where py >nul 2>&1 && set SERVER_CMD=py
+set SERVER_ARG=
+
+call :probe "py" "-3"
+if not defined SERVER_CMD for /f "delims=" %%P in ('where python 2^>nul') do (
+    if not defined SERVER_CMD call :probe_path "%%P"
+)
+if not defined SERVER_CMD for /f "delims=" %%P in ('where python3 2^>nul') do (
+    if not defined SERVER_CMD call :probe_path "%%P"
 )
 
-echo [3/3] 启动服务器并打开浏览器...
+echo [3/3] 启动本地静态服务器...
 echo.
 
-REM 绑定地址说明：默认 http.server 监听 [::1]（IPv6 回环），
-REM 而浏览器可能用 IPv4 访问 127.0.0.1 -> 拒绝连接。
-REM 显式绑定 127.0.0.1 可同时兼容 IPv4 浏览器。
+REM  绑定地址说明：默认 http.server 会监听到 [::1]（仅 IPv6 回环），
+REM  某些浏览器只连 IPv4 的 127.0.0.1 -> 拒绝连接。显式绑 127.0.0.1 更稳。
 pushd "%~dp0web"
-if defined SERVER_CMD (
-    start "" /min %SERVER_CMD% -m http.server 8899 --bind 127.0.0.1
-) else (
-    echo   [提示] 未找到 Python，改用 Node.js
-    where node >nul 2>&1
-    if errorlevel 1 (
-        echo   [错误] 既没有 Python 也没有 Node.js
-        echo   请安装 Python: https://www.python.org/downloads/
-        echo   或安装 Node.js: https://nodejs.org/
-        echo.
-        popd
-        pause
-        exit /b 1
-    )
-    REM node -e 写一个极简静态服务器
-    start "" /min node -e "const h=require('http'),f=require('fs'),p=require('path');h.createServer((q,s)=>{let u=q.url==='/'?'/index.html':q.url;s.setHeader('Content-Type',u.endsWith('.json')?'application/json':'text/html; charset=utf-8');f.readFile(p.join('.',u),(e,d)=>e?s.writeHead(404).end():s.end(d))}).listen(8899,'127.0.0.1')"
-)
+if not defined SERVER_CMD goto use_node
+echo       使用解释器: %SERVER_CMD% %SERVER_ARG%
+start "synq-web" /min %SERVER_CMD% %SERVER_ARG% -m http.server 8899 --bind 127.0.0.1
+goto server_started
+
+:use_node
+echo   [提示] 未找到可用 Python，尝试 Node.js
+where node >nul 2>&1
+if errorlevel 1 goto no_server
+start "synq-web" /min node -e "const h=require('http'),f=require('fs'),p=require('path');h.createServer((q,s)=>{let u=q.url==='/'?'/index.html':q.url;s.setHeader('Content-Type',u.endsWith('.json')?'application/json':'text/html; charset=utf-8');f.readFile(p.join('.',u),(e,d)=>e?s.writeHead(404).end():s.end(d))}).listen(8899,'127.0.0.1')"
+goto server_started
+
+:no_server
+echo   [错误] 既没有可用的 Python 也没有 Node.js
+echo   安装 Python: https://www.python.org/downloads/
+echo   安装 Node.js: https://nodejs.org/
+echo.
+popd
+pause
+exit /b 1
+
+:server_started
 popd
 
-REM 等待服务器就绪：轮询端口，最多等 5 秒
+REM  等待服务器就绪，轮询端口，最多 15 次（约 15 秒）
 set /a _try=0
 :wait_loop
 netstat -ano | findstr :8899 | findstr LISTENING >nul && goto ready
 set /a _try+=1
-if !_try! GEQ 10 (
-    echo   [错误] 服务器启动失败，请检查是否安装了 Python
+if !_try! GEQ 15 (
+    echo.
+    echo   [错误] 服务器启动失败：8899 端口始终未监听
+    echo   已尝试的解释器: %SERVER_CMD% %SERVER_ARG%
+    echo   排查建议：
+    echo     1. 双击 stop_web.bat 释放端口后重试
+    echo     2. 若使用 Microsoft Store 版 Python，请在 Windows 设置中
+    echo        关闭「应用执行别名」里的 python.exe
+    echo     3. 或安装官方 Python: https://www.python.org/downloads/
+    echo.
     pause
     exit /b 1
 )
 ping -n 1 127.0.0.1 >nul
 goto wait_loop
 :ready
-echo   服务器已就绪
+echo   [OK] 服务器已就绪
 start "" http://127.0.0.1:8899
 
-echo   浏览器已打开 http://localhost:8899
+echo   请在浏览器访问 http://localhost:8899
 echo   关闭方式：双击 stop_web.bat
 echo.
-echo 按任意键关闭此窗口（服务器会继续运行）...
+echo 按任意键关闭此窗口（不影响已启动的服务器）...
 pause >nul
 endlocal
+exit /b 0
+
+REM ============ 子过程 ============
+:probe
+REM  %~1 = 命令或路径, %~2 = 附加固定参数（如 -3）
+REM  只有真的能执行 python 代码才算可用，避免命中商店假存根
+"%~1" %~2 -c "import sys" >nul 2>&1
+if not errorlevel 1 (
+    set SERVER_CMD="%~1"
+    set SERVER_ARG=%~2
+)
+goto :eof
+
+:probe_path
+REM  跳过微软商店假存根（WindowsApps 下的 python.exe）
+echo %~1 | findstr /i "WindowsApps" >nul
+if not errorlevel 1 goto :eof
+call :probe "%~1" ""
+goto :eof
