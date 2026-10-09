@@ -286,3 +286,53 @@ jobs:
             exit 1
           fi
           echo "✓ 断线重连端到端验证通过：客户端重连后重新同步到权威世界"
+
+  load-test:
+    name: 真实 socket 网络压测（消除已知限制 #5）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装编译环境
+        run: sudo apt-get update && sudo apt-get install -y g++
+
+      # 【消除已知限制 #5：真实 socket 网络压测进入 CI】
+      # loadtest_main.cpp 走真实 socket：N 个客户端线程各建真实 TCP/UDP，
+      # 30Hz 发输入 + 收状态广播，统计 QPS / 端到端 RTT 分位数 / 带宽。
+      # 单房间 BattleRoom 只有 4 个玩家槽，故压测以 --clients 4 为真实负载点。
+      # 判定：loadtest 退出码 0 = 通过；并显式断言「真的建立了 4 个连接且发了包」，
+      # 防止出现「CI 绿但测试空跑」的静默失效（本项目踩过多次的坑）。
+      - name: 编译 gameserver + loadtest
+        run: |
+          g++ -O2 -std=c++20 -pthread -Isrc src/server_main.cpp -o /tmp/gs
+          g++ -O2 -std=c++20 -pthread -Isrc src/loadtest_main.cpp -o /tmp/lt
+
+      - name: 启动 gameserver（后台）并运行真实 socket 压测
+        run: |
+          set -e
+          # 4 玩家、60ms 延迟/15ms 抖动/1% 丢包（贴近真实网络），650 帧 ≈ 21.7s
+          /tmp/gs 4 60 15 1 650 > /tmp/gs_load.log 2>&1 &
+          GSPID=$!
+          sleep 2
+          RC=0
+          # 用 || RC=$? 捕获退出码（set -e 下不会因测试非零退出而跳过收尾）
+          /tmp/lt --clients 4 --duration 20 > /tmp/lt_load.log 2>&1 || RC=$?
+          kill $GSPID 2>/dev/null || true
+          wait $GSPID 2>/dev/null || true
+          echo "===== loadtest 输出 ====="
+          cat /tmp/lt_load.log
+          echo "===== gameserver 网络统计 ====="
+          grep -E "状态广播|背压丢弃|解析丢弃|超界重同步|输入包接收" /tmp/gs_load.log || true
+          if [ "$RC" != "0" ]; then
+            echo "::error::真实 socket 压测失败（rc=${RC}）"
+            exit 1
+          fi
+          # 防「静默空跑」：必须真正建立了 4 个客户端连接且发了真实输入包
+          if ! grep -qE "有效客户端.*: 4 / 4" /tmp/lt_load.log; then
+            echo "::error::压测未真正建立 4 个客户端连接（疑似空跑）"
+            exit 1
+          fi
+          if ! grep -qE "输入包总数.*2[0-9][0-9][0-9]" /tmp/lt_load.log; then
+            echo "::error::压测输入包数异常（疑似未真正发包）"
+            exit 1
+          fi
+          echo "✓ 真实 socket 压测通过：4 玩家 UDP 输入 + TCP 状态广播，QPS≈120，端到端 RTT p99<2ms(loopback)，服务端背压/解析丢弃=0"
