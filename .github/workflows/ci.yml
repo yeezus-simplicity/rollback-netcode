@@ -378,3 +378,43 @@ jobs:
             exit 1
           fi
           echo "✓ 多房间真实 socket 压测通过：32 房间 × 4 玩家（256 个客户端 socket），零背压，TCP 字节数零差异"
+
+  bench:
+    name: 性能基准与不变量门禁（防性能回归）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装编译环境
+        run: sudo apt-get update && sudo apt-get install -y g++
+
+      # 【为什么要分两层门禁】
+      #   CI runner 与开发机配置不同，绝对吞吐阈值只有两种下场：卡太紧 →
+      #   天天因环境抖动误报，最后被人用 `|| true` 绕过（门禁废掉）；卡太松 →
+      #   真回归也照样绿。所以本 job：
+      #     A. **算法不变量**（跨机器必成立，硬断言）：
+      #        ① 回滚重算帧数 = 延迟 + 1  ② 回滚后哈希 == 零延迟理想哈希
+      #        ③ 增量包大小 ≤ 全量包大小
+      #     B. **吞吐**（下限放宽约 10 倍，真实数字打进日志供人工看趋势）
+      #   退出码非 0 → CI 红。
+      - name: 编译并运行性能基准
+        run: |
+          set -e
+          g++ -O2 -std=c++20 -pthread -Isrc src/bench_main.cpp -o /tmp/bench
+          RC=0
+          /tmp/bench > /tmp/bench.log 2>&1 || RC=$?
+          cat /tmp/bench.log
+          if [ "$RC" != "0" ]; then
+            echo "::error::性能基准/不变量门禁失败（rc=${RC}）"
+            exit 1
+          fi
+          # 防「静默空跑」：必须真的跑完断言并拿到 BENCH_OK
+          if ! grep -q "BENCH_OK" /tmp/bench.log; then
+            echo "::error::未拿到 BENCH_OK（疑似空跑或断言未执行）"
+            exit 1
+          fi
+          # 防「静默失效」：线性性不变量必须真的被执行过
+          if ! grep -q "重算帧数 = 延迟+1" /tmp/bench.log; then
+            echo "::error::线性性不变量未执行（防静默失效）"
+            exit 1
+          fi
+          echo "✓ 性能基准通过：算法不变量全过（线性性/正确性/增量编码），吞吐高于下限"

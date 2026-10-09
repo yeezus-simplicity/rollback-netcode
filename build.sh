@@ -40,6 +40,7 @@ build loadtest     loadtest_main.cpp
 build reconnect     reconnect_test.cpp
 build rollback_bound rollback_bound_test.cpp
 build multiroomnet  multiroom_net_test.cpp
+build bench         bench_main.cpp
 
 if [[ "$1" == "verify" ]]; then
   echo ""
@@ -104,6 +105,10 @@ if [[ "$1" == "verify" ]]; then
   echo ""
   echo "===== 11. 真实 socket × 多房间（消除 #5 缺口）====="
   "$OUT/multiroomnet" 32 10 4 | grep -E "正常房间|实际 tick|输入包\(服务端|状态包\(服务端|状态字节|单 tick|MULTIROOM"
+
+  echo ""
+  echo "===== 12. 性能基准与不变量门禁 ====="
+  "$OUT/bench" | grep -E "PASS|FAIL|BENCH" || true
 fi
 
 if [[ "$1" == "server" ]]; then
