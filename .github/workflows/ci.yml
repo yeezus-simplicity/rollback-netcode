@@ -379,6 +379,32 @@ jobs:
           fi
           echo "✓ 多房间真实 socket 压测通过：32 房间 × 4 玩家（256 个客户端 socket），零背压，TCP 字节数零差异"
 
+      # 【模拟线程分片路径（已知限制 #2 轻量版）】
+      #   房间之间无共享状态 → 分片只是把「哪个房间归哪条线程」重新分配，
+      #   不破坏「每个房间只被一条线程读写」，因此无需锁、无数据竞争。
+      #   这里跑 2 条分片，证明分片路径（round-robin 分配 / 每分片统计 /
+      #   最差分片判定）在 CI 里也真的能工作。**性能规模结论（128 房间回到预算内）
+      #   是本机 16 核实测，写进 README —— CI runner 核数少，不在此断言绝对规模。**
+      - name: 模拟线程分片路径（32 房间 / 2 分片）
+        run: |
+          set -e
+          RC=0
+          /tmp/mrn 32 10 4 2 > /tmp/mrn_shard.log 2>&1 || RC=$?
+          cat /tmp/mrn_shard.log
+          if [ "$RC" != "0" ]; then
+            echo "::error::分片路径压测失败（rc=${RC}）"
+            exit 1
+          fi
+          if ! grep -q "MULTIROOM_OK rooms=32 players=4 shards=2" /tmp/mrn_shard.log; then
+            echo "::error::分片运行未拿到 MULTIROOM_OK shards=2（疑似分片未生效）"
+            exit 1
+          fi
+          if ! grep -q "模拟分片.*2 条线程" /tmp/mrn_shard.log; then
+            echo "::error::未看到 2 条分片的分配输出（防静默失效）"
+            exit 1
+          fi
+          echo "✓ 分片路径通过：32 房间 split 到 2 条模拟线程，各分片 tick 均在预算内"
+
   bench:
     name: 性能基准与不变量门禁（防性能回归）
     runs-on: ubuntu-latest

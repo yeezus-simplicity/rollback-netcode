@@ -130,7 +130,14 @@ if [[ "$1" == "verify" ]]; then
 
   echo ""
   echo "===== 11. 真实 socket × 多房间（消除 #5 缺口）====="
-  "$OUT/multiroomnet" 32 10 4 | grep -E "正常房间|实际 tick|输入包\(服务端|状态包\(服务端|状态字节|单 tick|MULTIROOM"
+  "$OUT/multiroomnet" 32 10 4 | grep -E "正常房间|实际 tick|输入包\(服务端|状态包\(服务端|状态字节|每条分片|容量判定|MULTIROOM"
+
+  echo ""
+  echo "----- 11b. 模拟线程分片（已知限制 #2 轻量版）-----"
+  echo "  64 房间 / 1 分片（基线，预期 tick 超预算）:"
+  "$OUT/multiroomnet" 64 5 4 1 | grep -E "容量判定|MULTIROOM" || true
+  echo "  64 房间 / 4 分片（预期回到预算内）:"
+  "$OUT/multiroomnet" 64 5 4 4 | grep -E "容量判定|MULTIROOM" || true
 
   echo ""
   echo "===== 12. 性能基准与不变量门禁 ====="
