@@ -152,7 +152,9 @@ bool spawn_shard(const std::string& exe, const std::vector<std::string>& args,
     cargs.push_back(const_cast<char*>(exe.c_str()));
     for (auto& a : args) cargs.push_back(const_cast<char*>(a.c_str()));
     cargs.push_back(nullptr);
-    ::execv(exe.c_str(), cargs.data());
+    // execvp（而非 execv）：当以「无斜杠」方式调用（如 PATH 里直接敲 mprocshard）时，
+    // execv 因不搜 PATH 会失败、子进程退 127、分片根本没起来。execvp 搜 PATH，行为更稳。
+    ::execvp(exe.c_str(), cargs.data());
     ::_exit(127);
   }
   out->pid = pid;
@@ -689,6 +691,7 @@ int run_router(int rooms, int shards, int players, int duration_s) {
   std::uint64_t worst_p99 = 0, worst_max = 0;
   std::uint64_t shard_in = 0, shard_bp = 0;
   int min_ticks = duration_s * kTickRate;
+  const int expected_ticks = duration_s * kTickRate;
   for (auto* ch : chs) {
     shard_in += ch->input_pkts.load();
     shard_bp += ch->shard_backpressure.load() + ch->bp_in.load() + ch->bp_out.load();
@@ -719,8 +722,8 @@ int run_router(int rooms, int shards, int players, int duration_s) {
   std::printf(" 客户端连接失败房间: %d\n", rooms_noconn);
   std::printf(" 分片进程          : %d 个 (每进程约 %d 房间)\n", shards,
               (rooms + shards - 1) / shards);
-  std::printf(" shard tick 完成  : %d / %d (最少的那条)\n", min_ticks,
-              duration_s * kTickRate);
+  std::printf(" shard tick 完成  : %d / %d (最少的那条, 满额阈值 %d)\n", min_ticks,
+              duration_s * kTickRate, static_cast<int>(expected_ticks * 0.95));
   std::printf(" 实际 tick 频率    : %.1f Hz (目标 %d) %s\n", achieved_hz, kTickRate,
               achieved_hz >= kTickRate * 0.95 ? "[未饱和]" : "[已饱和/掉帧]");
   std::printf(" 输入包(服务端实收): %llu  (%.0f 包/秒)\n", (unsigned long long)shard_in,
@@ -740,9 +743,13 @@ int run_router(int rooms, int shards, int players, int duration_s) {
               tick_in_budget ? "[在预算内]" : "[超预算/掉帧]",
               (unsigned long long)worst_p99, frame_us);
 
+  // 每个分片都跑满 tick 预算（允许 5% 时序抖动）：容量 demo 的核心不变量——
+  // 若某分片只跑了半数 tick（被饿死/卡住），不该判容量 OK。
+  const bool ticks_full =
+      min_ticks >= static_cast<int>(static_cast<double>(expected_ticks) * 0.95);
   const bool pass = (bind_fail == 0 && rooms_ok == rooms && rooms_noconn == 0 &&
                      tback == 0 && bytes_diff_pct < 2.0 && tick_in_budget &&
-                     achieved_hz >= kTickRate * 0.95);
+                     achieved_hz >= kTickRate * 0.95 && ticks_full);
   std::printf("\n==========================================================\n");
   if (pass) {
     std::printf("MPROC_OK rooms=%d players=%d shards=%d qps=%.0f tick_p99_us=%llu\n",

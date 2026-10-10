@@ -443,7 +443,10 @@ jobs:
             echo "::error::未拿到 MPROC_OK rooms=8（疑似空跑 / 分片或共享内存通道失效）"
             exit 1
           fi
-          if ! grep -qE "状态字节 发出/收到.*差 0\.[0-9]+%" /tmp/mproc.log; then
+          # 注：MPROC_OK 自身已要求字节差 <2%，此处只需确认「校验行存在且差值 <2%」
+          # （即 0.00%–1.99%）。早期写成 `差 0\.[0-9]+%` 只认 <1%，runner 负载高时
+          # 产生 1.x% 差仍属通过却会误杀 CI（假红），故放宽为 [01]\.[0-9]+%。
+          if ! grep -qE "状态字节 发出/收到.*差 [01]\.[0-9]+%" /tmp/mproc.log; then
             echo "::error::TCP 字节校验行缺失或异常（防静默失效）"
             exit 1
           fi
