@@ -178,6 +178,50 @@
   `1022ecfad726271e`）；O0/O2 逐帧哈希一致；`multiroomnet 32` 仍 `MULTIROOM_OK`；
   `-Wall -Wextra -Werror` 零告警。
 
+### 已知限制 #2 延伸：单机多进程房间分片（超出课程范围的降级 demo）
+
+**背景**：#2 轻量版是「单进程内多模拟线程分片」。用户明确选择把「单机的多进程分片」作为
+下一步探索方向——这是迈向**跨机分片**的第一道门槛（强隔离 + 跨进程通道），也是课程范围之外、
+但最能体现代码分片不变量的一次工程练习。本批作为 **v1.2.0 收口后的附加 demo** 单独实现，
+**未改任何既有功能代码**，仅新增文件、接入 `build.sh` 与 CI。
+
+- 新增 `src/net/shm.h`：跨平台**命名共享内存**段封装
+  （POSIX `shm_open`/`ftruncate`/`mmap` + Windows `CreateFileMappingA`/`MapViewOfFile`/`OpenFileMappingA`）。
+- 新增 `src/mproc_shard_main.cpp`：单二进制双角色
+  - `router` 角色：持有**全部客户端真实 socket**（每房间 UDP 收输入 + TCP 广播状态），
+    `fork`/`CreateProcess` 出 N 个 `shard` 子进程，经**共享内存 SPSC 无锁环**转发输入/ack/重连、
+    回收状态广播给客户端。
+  - `shard` 角色：在**独立 OS 进程**里跑分配给自己的房间（`BattleRoom`），只碰共享内存环，
+    物理上不与其他 shard 共享地址空间。
+- **为什么这条通道值得做**：进程隔离是比线程隔离更强的不变量——shard 间**不可能**共享地址空间，
+  任何「共享状态导致竞态」在编译/运行层面都不可能发生。通道用无锁 SPSC 环放在共享内存里，
+  router 生产 / shard 消费（每条环唯一生产者与消费者），跨进程原子量落在同一物理页，无需任何锁。
+- **与多线程分片完全一致**：复用了 `room_shard.h` 的 `shard_of(room_index, shards)` round-robin
+  分配与「**最差分片** tick p99 是否落预算内」的验收标准；差别仅在于 worker 是进程、通道是共享内存环。
+- **本地实测（Windows MSYS2，16 逻辑核，router 进程持有 socket + 2 个 shard 进程）**：
+
+  | 房间数 | 分片进程 | 最差分片 p99 | 预算占用 | 频率 | 背压 | TCP 字节差 |
+  |---|---|---|---|---|---|---|
+  | 8 | 2 | 255 µs | 0.76% | 29.9 Hz | 0 | 0.00% |
+  | 9 | 3 | 415 µs | 1.25% | 30.0 Hz | 0 | 0.00% |
+  | 16 | 4 | 575 µs | 1.73% | 30.0 Hz | 0 | 0.30% |
+  | 8 | 1 | 175 µs | 0.52% | 30.0 Hz | 0 | 0.36% |
+
+  输出 `MPROC_OK rooms=<r> players=<p> shards=<s> qps=<q> tick_p99_us=<u>`；零背压 + TCP
+  字节发出≈收到（<2%）是硬判据。
+- **踩坑记录（已修复）**：
+  1. `Shm` 缺移动语义 → `vector<Shm>::push_back(move)` 触发隐式按成员移动，原对象析构 `close()`
+     把「同一份映射」释放，子进程 `OpenFileMapping` 失败、router 写已解映射地址段错误；改为手写
+     move（转移所有权 + 源置空）后解决。
+  2. Windows `CreateProcess` 命令行未把 exe 作为 `argv[0]` → 子进程 `argv[0]=="shard"` 使 `main`
+     读到的 `role=argv[1]=="0"` 而非 `"shard"`；改为 exe 作为首 token，与 POSIX `execv` 的
+     `cargs=[exe,"shard",...]` 对齐。
+  3. relay 循环早期按「每个房间」drain 整条分片出口环 → 同分片其他房间的包被弹出后丢弃；
+     改为按分片一次性 drain 再按 `room_id` 路由。
+- `build.sh` 新增 `mprocshard` 目标 + `verify` 第 14 步（断言 `MPROC_OK rooms=8`）；
+  CI 新增 `multiroom-mproc` job（POSIX 路径 `fork`+`shm_open`+`-lrt`，grep `MPROC_OK` / 字节校验 /
+  零背压三道防静默失效断言）。
+
 ## 验证总览
 
 - **本地**（Windows MSYS2 g++ 15.2.0）：`build.sh` 全部目标编译通过；`-Wall -Wextra -Werror` 零告警；
@@ -190,8 +234,9 @@
 
 ## 诚实保留（仍未做）
 
-- **跨机分片路由**：本版只做**单机内**多模拟线程分片；跨机路由（一致性哈希 + 跨机房间迁移）未做，
-  仍是单机单进程。
+- **跨机分片路由**：本版已具备「单机多**进程**分片」（独立 OS 进程 + 共享内存 SPSC 环通道，见上节），
+  但仍是单机内；跨机路由（一致性哈希 + 网络转发 + 跨机房间迁移）未做。从「多进程」到「跨机」的
+  关键新增是：序列化协议 + 网络传输层 + 房间迁移/再平衡——本 demo 故意不做，留作下阶段。
 - **客户端为 bot**：有预测器与 `web/` 可视化，无真实渲染引擎接入。
 - **未证明「百万连接」级**：无 epoll/io_uring、无分片路由。
 

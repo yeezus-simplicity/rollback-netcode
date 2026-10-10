@@ -8,10 +8,13 @@ set -e
 cd "$(dirname "$0")"
 
 CXXFLAGS="-O2 -std=c++20 -pthread"
-OSFLAG=""
+LIBS=""
 if [[ "$OSTYPE" == msys* || "$OS" == "Windows_NT" ]]; then
-  OSFLAG="-lws2_32"
+  LIBS="-lws2_32"
   echo "[build] Windows/MSYS2: 链接 ws2_32"
+else
+  LIBS="-lrt"
+  echo "[build] POSIX: 链接 rt（shm_open/mmap 命名共享内存）"
 fi
 
 OUT="${TMPDIR:-/tmp}/synq_build"
@@ -45,7 +48,7 @@ fi
 
 build() {
   local name=$1 src=$2
-  g++ $CXXFLAGS -Isrc "src/$src" -o "$OUT/$name" $OSFLAG
+  g++ $CXXFLAGS -Isrc "src/$src" -o "$OUT/$name" $LIBS
   echo "  ✓ $name"
 }
 
@@ -68,6 +71,7 @@ build rollback_bound rollback_bound_test.cpp
 build multiroomnet  multiroom_net_test.cpp
 build bench         bench_main.cpp
 build prediction    prediction_test.cpp
+build mprocshard    mproc_shard_main.cpp
 
 if [[ "$1" == "verify" ]]; then
   echo ""
@@ -147,6 +151,16 @@ if [[ "$1" == "verify" ]]; then
   echo ""
   echo "===== 13. 输入预测策略（消除 #1）====="
   "$OUT/prediction" | grep -E "参考上限|旧 同相位|同相位真实优先|意图持续优先|PREDICTION" || true
+
+  echo ""
+  echo "===== 14. 多进程房间分片（跨进程共享内存 SPSC 环通道）====="
+  "$OUT/mprocshard" router 8 2 4 6 > "$OUT/mprocshard.log" 2>&1
+  cat "$OUT/mprocshard.log" | grep -E "正常房间|实际 tick|输入包\(服务端|状态包\(服务端|状态字节|每条分片|容量判定|MPROC_" || true
+  if ! grep -q "MPROC_OK rooms=8" "$OUT/mprocshard.log"; then
+    echo "  ✗ 多进程分片验证失败（未拿到 MPROC_OK rooms=8）"
+    exit 1
+  fi
+  echo "  ✓ 多进程分片验证通过：router 进程持有客户端 socket，shard 进程经共享内存 SPSC 环跑模拟"
 fi
 
 if [[ "$1" == "server" ]]; then

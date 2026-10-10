@@ -112,12 +112,14 @@ jobs:
       #
       # 这里补齐到与 build.sh 一致的全部程序，
       # 编译**成功即可**，不运行（server/visual_demo 是交互式长驻程序）。
-      - name: 编译其余 4 个程序（仅检查，不运行）
+      - name: 编译其余程序（仅检查，不运行）
         run: |
           g++ -O2 -std=c++20 -pthread -Isrc src/rollback_diff.cpp        -o /tmp/rbdiff
           g++ -O2 -std=c++20 -pthread -Isrc src/client/visual_demo.cpp   -o /tmp/vdemo
           g++ -O2 -std=c++20 -pthread -Isrc src/server_main.cpp          -o /tmp/srv
           g++ -O2 -std=c++20 -pthread -Isrc src/export_trace.cpp         -o /tmp/exp
+          # 多进程分片 demo（POSIX 路径用 fork + shm_open，需 -lrt）
+          g++ -O2 -std=c++20 -pthread -lrt -Isrc src/mproc_shard_main.cpp -o /tmp/mprocshard_buildcheck
 
       # 这一步是本项目 CI 的核心价值 ——
       # 用 5 种优化级别编译同一份模拟核心，逐帧比对状态哈希。
@@ -404,6 +406,52 @@ jobs:
             exit 1
           fi
           echo "✓ 分片路径通过：32 房间 split 到 2 条模拟线程，各分片 tick 均在预算内"
+
+  multiroom-mproc:
+    name: 多进程房间分片（跨进程共享内存 SPSC 环通道）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装编译环境
+        run: sudo apt-get update && sudo apt-get install -y g++
+
+      # 【超出课程范围 · 降级 demo：单机多进程房间分片】
+      #   此前 multiroom-net 是「单进程内多模拟线程分片」；本 job 把模拟搬进**独立 OS 进程**
+      #   （shard），router 进程持有全部客户端 socket，客户端输入经「跨进程共享内存 SPSC 环」
+      #   送给对应 shard，shard 跑完模拟后经另一条环送回 router 转发给客户端。
+      #   进程隔离是比线程隔离更强的不变量：shard 间物理上不共享地址空间，任何
+      #   「共享状态导致竞态」在编译/运行层面都不可能发生 —— 这是迈向跨机分片的第一步
+      #   （下一步才是网络转发 + 一致性哈希，本 demo 不做，已在 README 注明）。
+      #
+      #   与多线程分片保持一致：round-robin（room_index % shards）分配 + 最差分片 tick
+      #   p99 决定整体是否在预算内的验收标准。差别仅在于 worker 是进程、通道是共享内存环。
+      #
+      #   判定：程序自带 MPROC_OK/MPROC_FAIL（退出码 0/1）。此处额外 grep 字节校验行与
+      #   零背压，防止「CI 绿但链路没真通」的静默失效（本项目多次踩过的坑）。
+      - name: 编译并运行多进程分片 demo
+        run: |
+          set -e
+          g++ -O2 -std=c++20 -pthread -lrt -Isrc src/mproc_shard_main.cpp -o /tmp/mprocshard
+          RC=0
+          /tmp/mprocshard router 8 2 4 6 > /tmp/mproc.log 2>&1 || RC=$?
+          cat /tmp/mproc.log
+          if [ "$RC" != "0" ]; then
+            echo "::error::多进程分片 demo 退出非零（rc=${RC}）"
+            exit 1
+          fi
+          if ! grep -q "MPROC_OK rooms=8" /tmp/mproc.log; then
+            echo "::error::未拿到 MPROC_OK rooms=8（疑似空跑 / 分片或共享内存通道失效）"
+            exit 1
+          fi
+          if ! grep -qE "状态字节 发出/收到.*差 0\.[0-9]+%" /tmp/mproc.log; then
+            echo "::error::TCP 字节校验行缺失或异常（防静默失效）"
+            exit 1
+          fi
+          if ! grep -qE "背压丢弃 0" /tmp/mproc.log; then
+            echo "::error::存在背压丢弃（零背压是硬判据）"
+            exit 1
+          fi
+          echo "✓ 多进程分片通过：router 持 socket、shard 经共享内存 SPSC 环跑模拟，8 房间 × 4 玩家，零背压，TCP 字节零差异"
 
   bench:
     name: 性能基准与不变量门禁（防性能回归）
