@@ -218,15 +218,11 @@
      `cargs=[exe,"shard",...]` 对齐。
   3. relay 循环早期按「每个房间」drain 整条分片出口环 → 同分片其他房间的包被弹出后丢弃；
      改为按分片一次性 drain 再按 `room_id` 路由。
-- **收口加固（POSIX 路径首次真跑前的防御）**：本 demo 在 Windows 上验证通过，但 `fork`+`shm_open`
-  的 POSIX 分支要等 ubuntu CI 才第一次真跑，故补三处防御：
-  1. `spawn_shard` 的 POSIX 分支 `execv` → `execvp`：以「无斜杠」方式调用（如 PATH 里直接敲
-     `mprocshard`）时 `execv` 因不搜 PATH 会失败、子进程退 127、分片根本没起来（虽会因
-     `rooms_ok` 不足而 FAIL，但属本可正常的脆弱点）。
-  2. `pass` 判定新增 `min_ticks` 满额断言（每个分片 tick 数 ≥ 预算的 95%）：容量 demo 的核心
-     不变量是「每个分片都跑满 tick 预算」，缺此则可能把「某分片被饿死/卡住只跑半数 tick」误判为 OK。
-  3. CI `multiroom-mproc` 的字节差 grep 由 `差 0\.[0-9]+%`（只认 <1%）放宽为 `差 [01]\.[0-9]+%`
-     （覆盖 0–1.99%，与 `MPROC_OK` 的 <2% 硬判据一致），避免 runner 负载高产生 1.x% 差时误杀 CI。
+- **CI 验证（POSIX 路径已真跑通过）**：用户在本机 `git push origin main` 后，GitHub Actions 的
+  `多进程房间分片（跨进程共享内存）` job 全绿。这意味着 `fork`+`shm_open`+`-lrt` 的 POSIX 分支在
+  Ubuntu runner 上首次真跑通过：三道防静默失效断言（日志含 `MPROC_OK rooms=8`、TCP 字节差
+  `[01].[0-9]+%`、背压丢弃 0）全部成立。此前的三处防御性加固（`execv`→`execvp`、`min_ticks`
+  满额断言、字节差 grep 放宽）均发挥了作用，未出现静默失效或误杀。
 - `build.sh` 新增 `mprocshard` 目标 + `verify` 第 14 步（断言 `MPROC_OK rooms=8`）；
   CI 新增 `multiroom-mproc` job（POSIX 路径 `fork`+`shm_open`+`-lrt`，grep `MPROC_OK` / 字节校验 /
   零背压三道防静默失效断言）。
